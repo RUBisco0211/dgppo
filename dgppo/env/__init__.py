@@ -3,7 +3,7 @@ from typing import Optional
 from .base import MultiAgentEnv
 from dgppo.env.mpe import MPETarget, MPESpread, MPELine, MPEFormation, MPECorridor, MPEConnectSpread
 from dgppo.env.lidar_env import LidarSpread, LidarTarget, LidarLine, LidarBicycleTarget
-from dgppo.env.vmas import VMASWheel, VMASReverseTransport
+from dgppo.env.vmas import VMASWheel, VMASReverseTransport, VMASNavigation, VMASNavigationObs
 
 
 ENV = {
@@ -18,9 +18,14 @@ ENV = {
     'LidarTarget': LidarTarget,
     'LidarLine': LidarLine,
     'LidarBicycleTarget': LidarBicycleTarget,
-    'VMASReverseTransport': VMASReverseTransport,
-    'VMASWheel': VMASWheel,
+    'VMASNavigation': VMASNavigation,
+    'VMASNavigationObs': VMASNavigationObs,
 }
+
+if VMASReverseTransport is not None:
+    ENV['VMASReverseTransport'] = VMASReverseTransport
+if VMASWheel is not None:
+    ENV['VMASWheel'] = VMASWheel
 
 
 DEFAULT_MAX_STEP = 128
