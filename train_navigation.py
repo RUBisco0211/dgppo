@@ -9,8 +9,10 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import importlib.util
 import json
 import os
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable
@@ -53,8 +55,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda", help="Kept for CLI compatibility; JAX chooses the backend.")
     parser.add_argument("--save-folder", default="outputs")
-    parser.add_argument("--render", action="store_true", help="Enable eval video logging. Disabled by default for headless runs.")
+    parser.add_argument("--render", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-render", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--no-video",
+        action="store_true",
+        help="Disable eval video upload to wandb. Video upload is enabled by default when wandb is enabled.",
+    )
     parser.add_argument("--no-wandb", action="store_true")
     parser.add_argument(
         "--wandb-mode",
@@ -243,7 +250,7 @@ class GemsmarlStyleLogger:
                 "checkpoint_interval": args.checkpoint_interval,
                 "clip_grad_val": args.clip_grad_val,
                 "lr": args.lr,
-                "render": args.render and not args.no_render,
+                "render": not args.no_video and not args.no_render,
                 "loggers": [] if args.no_wandb else ["wandb"],
                 "wandb_mode": args.wandb_mode,
                 "project_name": args.project_name,
@@ -279,7 +286,7 @@ class GemsmarlStyleLogger:
     def log(self, metrics: Dict[str, Any], step: int):
         scalars = _flatten_scalars(metrics)
         if self.wandb_run is not None:
-            wandb.log(scalars, step=step)
+            wandb.log(scalars, step=step, commit=False)
         for key, value in scalars.items():
             self.metrics_writer.writerow([step, key, value])
         self.metrics_file.flush()
@@ -291,7 +298,12 @@ class GemsmarlStyleLogger:
         wandb.log(
             {"eval/video": wandb.Video(vid, fps=20, format="mp4")},
             step=step,
+            commit=False,
         )
+
+    def commit(self):
+        if self.wandb_run is not None:
+            wandb.log({}, commit=True)
 
     def finish(self):
         self.metrics_file.close()
@@ -340,6 +352,7 @@ def _collection_metrics(
     rollout: Rollout,
     iteration: int,
     total_frames: int,
+    current_frames: int,
     fps: float,
     cost_components: Iterable[str],
 ) -> Dict[str, float]:
@@ -352,6 +365,9 @@ def _collection_metrics(
         "general/iteration": iteration,
         "general/total_frames": total_frames,
         "general/fps": fps,
+        "counters/current_frames": current_frames,
+        "counters/total_frames": total_frames,
+        "counters/iter": iteration,
     }
     _add_min_mean_max(metrics, "collection/reward/reward", rewards)
     _add_min_mean_max(metrics, "collection/agents/reward/episode_reward", episode_returns)
@@ -422,7 +438,15 @@ def _render_eval_frames(env, rollout: Rollout) -> np.ndarray:
     obs_patches = []
     if o_pos is not None:
         obs_patches = [
-            plt.Circle((0, 0), env.params["obstacle_radius"], color="0.5", alpha=0.65)
+            plt.Circle(
+                (0, 0),
+                env.params["obstacle_radius"],
+                facecolor="0.35",
+                edgecolor="0.05",
+                linewidth=1.5,
+                alpha=0.85,
+                zorder=3,
+            )
             for _ in range(env.params["n_obs"])
         ]
         for patch in obs_patches:
@@ -464,9 +488,33 @@ def _render_eval_frames(env, rollout: Rollout) -> np.ndarray:
     return np.stack(frames, axis=0)
 
 
+def _save_latest_checkpoint(algo, folder: Path):
+    model_root = folder / "models"
+    latest_dir = model_root / "latest"
+    if latest_dir.exists():
+        shutil.rmtree(latest_dir)
+    model_root.mkdir(parents=True, exist_ok=True)
+    algo.save(str(model_root), "latest")
+
+
+def _check_video_dependencies(args: argparse.Namespace):
+    if args.no_wandb or args.no_video or args.no_render:
+        return
+    if importlib.util.find_spec("moviepy") is None:
+        raise RuntimeError(
+            "Eval video upload uses the same raw-frame wandb.Video path as GemsMARL, "
+            "which requires moviepy in this environment. Install it before training:\n"
+            "  mamba run -n dgppo pip install 'wandb[media]'\n"
+            "or:\n"
+            "  mamba run -n dgppo pip install moviepy\n"
+            "To run without eval video, pass --no-video."
+        )
+
+
 def main():
     args = _parse_args()
     schedule = _resolve_schedule(args)
+    _check_video_dependencies(args)
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
     if args.debug:
         os.environ["JAX_DISABLE_JIT"] = "True"
@@ -550,6 +598,7 @@ def main():
     best_eval_reward = -np.inf
     total_frames = 0
     start = time.time()
+    total_time = 0.0
     train_key = jr.PRNGKey(args.seed)
     eval_key = jr.PRNGKey(args.seed + 10_000)
 
@@ -560,44 +609,68 @@ def main():
             key_x0, train_key = jr.split(train_key)
             train_keys = jr.split(key_x0, args.on_policy_n_envs_per_worker)
             rollouts = algo.collect(algo.params, train_keys)
-            total_frames += schedule["frames_per_iter"]
-            fps = schedule["frames_per_iter"] / max(time.time() - iter_start, 1e-6)
+            collection_time = time.time() - iter_start
+            current_frames = schedule["frames_per_iter"]
+            total_frames += current_frames
+            fps = current_frames / max(time.time() - iter_start, 1e-6)
             collection = _collection_metrics(
                 rollouts,
                 iteration=iteration,
                 total_frames=total_frames,
+                current_frames=current_frames,
                 fps=fps,
                 cost_components=env.cost_components,
             )
-            logger.log(collection, step=total_frames)
+            logger.log(collection, step=iteration)
 
+            training_start = time.time()
             update_info = algo.update(rollouts, iteration)
-            logger.log(_training_metrics(update_info), step=total_frames)
+            training_time = time.time() - training_start
+            logger.log(_training_metrics(update_info), step=iteration)
 
-            if (iteration + 1) % schedule["eval_interval_iters"] == 0:
+            evaluation_time = 0.0
+            if total_frames % args.evaluation_interval == 0 or iteration == 0:
+                evaluation_start = time.time()
                 eval_key, subkey = jr.split(eval_key)
                 eval_keys = jr.split(subkey, args.evaluation_episodes)
                 eval_rollouts = test_fn(algo.params, eval_keys)
+                evaluation_time = time.time() - evaluation_start
+                logger.log({"timers/evaluation_time": evaluation_time}, step=iteration)
                 metrics, best_eval_reward = _eval_metrics(
                     eval_rollouts, best_eval_reward, env.cost_components
                 )
                 metrics.update(
                     {
-                        "general/iteration": iteration + 1,
+                        "general/iteration": iteration,
                         "general/total_frames": total_frames,
                         "general/fps": total_frames / max(time.time() - start, 1e-6),
+                        "counters/current_frames": current_frames,
+                        "counters/total_frames": total_frames,
+                        "counters/iter": iteration,
                     }
                 )
-                logger.log(metrics, step=total_frames)
-                if args.render and not args.no_render:
+                logger.log(metrics, step=iteration)
+                if not args.no_wandb and not args.no_video and not args.no_render:
                     video_frames = _render_eval_frames(env_test, eval_rollouts)
-                    logger.log_video(video_frames, step=total_frames)
+                    logger.log_video(video_frames, step=iteration)
 
-            if (
-                schedule["checkpoint_interval_iters"]
-                and (iteration + 1) % schedule["checkpoint_interval_iters"] == 0
-            ):
-                algo.save(str(folder / "models"), iteration + 1)
+            iteration_time = time.time() - iter_start
+            total_time += iteration_time
+            logger.log(
+                {
+                    "timers/collection_time": collection_time,
+                    "timers/training_time": training_time,
+                    "timers/iteration_time": iteration_time,
+                    "timers/total_time": total_time,
+                    "counters/current_frames": current_frames,
+                    "counters/total_frames": total_frames,
+                    "counters/iter": iteration,
+                },
+                step=iteration,
+            )
+            logger.commit()
+
+            _save_latest_checkpoint(algo, folder)
 
             pbar.set_postfix(
                 reward=f"{collection['collection/reward/episode_reward_mean']:.3f}",
