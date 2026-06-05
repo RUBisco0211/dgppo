@@ -41,8 +41,9 @@ class VMASNavigation(MultiAgentEnv):
         "world_spawning_y": 1.0,
         "pos_shaping_factor": 1.0,
         "final_reward": 0.01,
-        "u_multiplier": 0.5,
+        "u_multiplier": 1.0,
         "damping": 0.75,
+        "dt": 0.1,
     }
 
     def __init__(
@@ -56,7 +57,7 @@ class VMASNavigation(MultiAgentEnv):
         params = self.PARAMS.copy() if params is None else params
         half_width = max(params["world_spawning_x"], params["world_spawning_y"])
         area_size = 2 * half_width
-        super().__init__(num_agents, area_size, max_step, dt, params)
+        super().__init__(num_agents, area_size, max_step, params.get("dt", dt), params)
         self.half_width = half_width
         self.agent_radius = params["agent_radius"]
 
@@ -356,7 +357,15 @@ class VMASNavigationObs(VMASNavigation):
         )
 
         obs_patches = [
-            plt.Circle((0, 0), self.params["obstacle_radius"], color="0.5", alpha=0.65)
+            plt.Circle(
+                (0, 0),
+                self.params["obstacle_radius"],
+                facecolor="0.35",
+                edgecolor="0.05",
+                linewidth=1.5,
+                alpha=0.85,
+                zorder=3,
+            )
             for _ in range(self.params["n_obs"])
         ]
         goal_patches = [
@@ -400,4 +409,3 @@ class VMASNavigationObs(VMASNavigation):
             blit=True,
         )
         save_anim(ani, video_path)
-
