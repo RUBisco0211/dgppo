@@ -13,6 +13,9 @@ from dgppo.trainer.data import Rollout
 from dgppo.utils.graph import EdgeBlock, GetGraph, GraphsTuple
 from dgppo.utils.typing import Action, Array, Cost, Done, Info, Reward, State
 from dgppo.utils.utils import save_anim, tree_index
+from .physax.entity import Agent
+from .physax.shapes import Sphere
+from .physax.world import World
 
 
 class VMASNavigationState(NamedTuple):
@@ -31,10 +34,19 @@ class VMASNavigation(MultiAgentEnv):
         "agent_radius": 0.1,
         "world_spawning_x": 1.0,
         "world_spawning_y": 1.0,
+        "enforce_bounds": False,
+        "collisions": True,
+        "shared_rew": True,
         "pos_shaping_factor": 1.0,
         "final_reward": 0.01,
+        "agent_collision_penalty": 0.0,
+        "min_collision_distance": 0.005,
         "u_multiplier": 1.0,
-        "damping": 0.75,
+        "drag": 0.25,
+        "substeps": 2,
+        "collision_force": 100.0,
+        "contact_margin": 1e-3,
+        "cost_margin": 0.5,
         "dt": 0.1,
     }
 
@@ -102,45 +114,102 @@ class VMASNavigation(MultiAgentEnv):
         self, graph: GraphsTuple, action: Action, get_eval_info: bool = False
     ) -> Tuple[GraphsTuple, Reward, Cost, Done, Info]:
         action = self.clip_action(action)
+        assert action.shape == (self.num_agents, self.action_dim)
         env_state: VMASNavigationState = graph.env_states
 
-        u = action * self.params["u_multiplier"]
-        a_vel = self.params["damping"] * env_state.a_vel + u * self.dt
-        a_pos = env_state.a_pos + a_vel * self.dt
-        a_pos = jnp.clip(a_pos, -self.half_width, self.half_width)
+        x_semidim = self.params["world_spawning_x"] if self.params["enforce_bounds"] else None
+        y_semidim = self.params["world_spawning_y"] if self.params["enforce_bounds"] else None
+        world = World(
+            dt=self.dt,
+            substeps=self.params["substeps"],
+            x_semidim=x_semidim,
+            y_semidim=y_semidim,
+            collision_force=self.params["collision_force"],
+            contact_margin=self.params["contact_margin"],
+        )
+
+        agents = self._make_agents(env_state, action)
+        agents, _ = world.step(agents)
+
+        a_pos = jnp.stack([agent.state.pos for agent in agents], axis=0)
+        a_vel = jnp.stack([agent.state.vel for agent in agents], axis=0)
+        assert a_pos.shape == (self.num_agents, 2)
+        assert a_vel.shape == (self.num_agents, 2)
 
         env_state_new = env_state._replace(a_pos=a_pos, a_vel=a_vel)
-        reward = self.get_reward(graph, env_state_new, action)
-        cost = self.get_cost(graph)
-        goal_reached = (
-            jnp.linalg.norm(env_state_new.a_pos - env_state_new.goal_pos, axis=-1)
-            < self.params["dist2goal"]
-        )
-        done = goal_reached.all()
+        next_graph = self.get_graph(env_state_new)
+        reward = self.get_reward(graph, env_state_new)
+        cost = self.get_transition_cost(env_state, env_state_new)
+        done = jnp.array(False)
         info = {}
-        return self.get_graph(env_state_new), reward, cost, done, info
+        return next_graph, reward, cost, done, info
+
+    def _make_agents(
+        self, env_state: VMASNavigationState, action: Action
+    ) -> list[Agent]:
+        agents = []
+        for ii in range(self.num_agents):
+            agent = Agent.create(
+                f"agent_{ii}",
+                shape=Sphere(self.agent_radius),
+                collide=self.params["collisions"],
+                rotatable=False,
+                u_multiplier=self.params["u_multiplier"],
+                drag=self.params["drag"],
+            )
+            agent = agent.withstate(pos=env_state.a_pos[ii], vel=env_state.a_vel[ii])
+            agent = agent.withforce(force=action[ii] * agent.u_multiplier)
+            agents.append(agent)
+        return agents
 
     def get_reward(
-        self, graph: GraphsTuple, next_state: VMASNavigationState, action: Action
+        self, graph: GraphsTuple, next_state: VMASNavigationState
     ) -> Reward:
         env_state: VMASNavigationState = graph.env_states
         prev_dist = jnp.linalg.norm(env_state.a_pos - env_state.goal_pos, axis=-1)
         next_dist = jnp.linalg.norm(next_state.a_pos - next_state.goal_pos, axis=-1)
-        progress = (prev_dist - next_dist).mean() * self.params["pos_shaping_factor"]
+        pos_rew = (prev_dist - next_dist) * self.params["pos_shaping_factor"]
+        progress = jnp.where(
+            self.params["shared_rew"],
+            pos_rew.sum(),
+            pos_rew.mean(),
+        )
         final_rew = jnp.where(
             (next_dist < self.params["dist2goal"]).all(),
             self.params["final_reward"],
             0.0,
         )
-        action_penalty = 0.001 * jnp.square(action).sum(axis=-1).mean()
-        return progress + final_rew - action_penalty
+        collision_rew = self._agent_collision_reward(
+            self._transition_agent_collision_cost(env_state, next_state)
+        ).sum()
+        return progress + final_rew + collision_rew
 
     def get_cost(self, graph: GraphsTuple) -> Cost:
         env_state: VMASNavigationState = graph.env_states
         agent_cost = self._agent_collision_cost(env_state.a_pos)
         cost = agent_cost[:, None]
+        margin = self.params["cost_margin"]
+        cost = jnp.where(cost <= 0.0, cost - margin, cost + margin)
         assert cost.shape == (self.num_agents, self.n_cost)
         return jnp.clip(cost, a_min=-1.0, a_max=1.0)
+
+    def get_transition_cost(
+        self, env_state: VMASNavigationState, next_state: VMASNavigationState
+    ) -> Cost:
+        agent_cost = self._transition_agent_collision_cost(env_state, next_state)
+        cost = agent_cost[:, None]
+        margin = self.params["cost_margin"]
+        cost = jnp.where(cost <= 0.0, cost - margin, cost + margin)
+        assert cost.shape == (self.num_agents, self.n_cost)
+        return jnp.clip(cost, a_min=-1.0, a_max=1.0)
+
+    def _transition_agent_collision_cost(
+        self, env_state: VMASNavigationState, next_state: VMASNavigationState
+    ) -> Array:
+        return jnp.maximum(
+            self._agent_collision_cost(env_state.a_pos),
+            self._agent_collision_cost(next_state.a_pos),
+        )
 
     def _agent_collision_cost(self, a_pos: Array) -> Array:
         dist = jnp.linalg.norm(a_pos[:, None, :] - a_pos[None, :, :], axis=-1)
@@ -148,8 +217,12 @@ class VMASNavigation(MultiAgentEnv):
         min_dist = jnp.min(dist, axis=1)
         return 2 * self.agent_radius - min_dist
 
+    def _agent_collision_reward(self, signed_dist: Array) -> Array:
+        collides = signed_dist >= -self.params["min_collision_distance"]
+        return jnp.where(collides, self.params["agent_collision_penalty"], 0.0)
+
     def get_graph(self, env_state: VMASNavigationState) -> GraphsTuple:
-        rel_goal_pos = env_state.goal_pos - env_state.a_pos
+        rel_goal_pos = env_state.a_pos - env_state.goal_pos
         node_feats = jnp.zeros((self.num_agents, self.node_dim))
         node_feats = node_feats.at[:, :2].set(env_state.a_pos)
         node_feats = node_feats.at[:, 2:4].set(env_state.a_vel)

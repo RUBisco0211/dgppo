@@ -304,7 +304,8 @@ class World:
         )
 
         for i, (entity_a, entity_b) in enumerate(s_s):
-            self.update_env_forces(entity_a, force_a[:, i], 0, entity_b, force_b[:, i], 0, forces_dict, torques_dict)
+            update_forcetorque(entity_a, force_a[i], 0, forces_dict, torques_dict)
+            update_forcetorque(entity_b, force_b[i], 0, forces_dict, torques_dict)
 
     def _sphere_line_collision(
         self, l_s: list[tuple[Entity, Entity]], forces_dict: dict[Entity, Vec2], torques_dict: dict[Entity, Vec1]
