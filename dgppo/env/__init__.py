@@ -40,7 +40,7 @@ def make_env(
         n_rays: Optional[int] = None,
 ) -> MultiAgentEnv:
     assert env_id in ENV.keys(), f'Environment {env_id} not implemented.'
-    params = ENV[env_id].PARAMS
+    params = ENV[env_id].PARAMS.copy()
     max_step = DEFAULT_MAX_STEP if max_step is None else max_step
     if num_obs is not None:
         params['n_obs'] = num_obs

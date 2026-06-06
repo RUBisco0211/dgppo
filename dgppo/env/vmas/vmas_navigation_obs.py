@@ -14,7 +14,6 @@ from dgppo.utils.typing import Action, Array, Cost, Done, Info, Reward
 from dgppo.utils.utils import save_anim, tree_index
 from .physax.entity import Entity
 from .physax.shapes import Sphere
-from .physax.world import World
 from .vmas_navigation import VMASNavigation, VMASNavigationState
 
 
@@ -48,22 +47,22 @@ class VMASNavigationObs(VMASNavigation):
         return ("agent collisions", "obstacle collisions")
 
     def reset(self, key: Array) -> GraphsTuple:
-        entity_key, goal_key, vel_key = jax.random.split(key, 3)
-        entity_pos, _ = get_node_goal_rng(
-            entity_key,
-            self.area_size,
-            2,
-            self.num_agents + self.params["n_obs"],
-            self.agent_radius + self.params["obstacle_radius"] + 0.05,
-            None,
-            side_length_y=self.area_size,
+        pos_key, vel_key = jax.random.split(key)
+        n_entities = self.num_agents + self.params["n_obs"]
+        min_dist = (
+            max(
+                2 * self.agent_radius,
+                self.agent_radius + self.params["obstacle_radius"],
+                2 * self.params["obstacle_radius"],
+            )
+            + 0.05
         )
-        _, goal_pos = get_node_goal_rng(
-            goal_key,
+        positions, _ = get_node_goal_rng(
+            pos_key,
             self.area_size,
             2,
-            self.num_agents,
-            2 * self.agent_radius + 0.05,
+            n_entities + self.num_agents,
+            min_dist,
             None,
             side_length_y=self.area_size,
         )
@@ -71,9 +70,9 @@ class VMASNavigationObs(VMASNavigation):
         offset = jnp.array(
             [self.params["world_spawning_x"], self.params["world_spawning_y"]]
         )
-        a_pos = entity_pos[: self.num_agents] - offset
-        goal_pos = goal_pos - offset
-        o_pos = entity_pos[self.num_agents :] - offset
+        a_pos = positions[: self.num_agents] - offset
+        o_pos = positions[self.num_agents : n_entities] - offset
+        goal_pos = positions[n_entities:] - offset
         a_vel = jax.random.uniform(
             vel_key, shape=(self.num_agents, 2), minval=-0.01, maxval=0.01
         )
@@ -87,17 +86,7 @@ class VMASNavigationObs(VMASNavigation):
         assert action.shape == (self.num_agents, self.action_dim)
         env_state: VMASNavigationObsState = graph.env_states
 
-        x_semidim = self.params["world_spawning_x"] if self.params["enforce_bounds"] else None
-        y_semidim = self.params["world_spawning_y"] if self.params["enforce_bounds"] else None
-        world = World(
-            dt=self.dt,
-            substeps=self.params["substeps"],
-            x_semidim=x_semidim,
-            y_semidim=y_semidim,
-            collision_force=self.params["collision_force"],
-            contact_margin=self.params["contact_margin"],
-        )
-
+        world = self._make_world()
         agents = self._make_agents(
             VMASNavigationState(env_state.a_pos, env_state.a_vel, env_state.goal_pos),
             action,

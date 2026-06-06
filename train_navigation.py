@@ -367,6 +367,16 @@ def _add_navigation_diagnostics(metrics: Dict[str, float], rollout: Rollout, pre
     metrics[f"{prefix}/diagnostics/min_agent_distance_mean"] = min_agent_dist.mean()
     metrics[f"{prefix}/diagnostics/min_agent_distance_min"] = min_agent_dist.min()
 
+    if hasattr(env_states, "o_pos"):
+        o_pos = np.asarray(env_states.o_pos)
+        agent_obstacle_dist = np.linalg.norm(
+            a_pos[..., :, None, :] - o_pos[..., None, :, :],
+            axis=-1,
+        )
+        min_obstacle_dist = agent_obstacle_dist.min(axis=(-1, -2))
+        metrics[f"{prefix}/diagnostics/min_obstacle_distance_mean"] = min_obstacle_dist.mean()
+        metrics[f"{prefix}/diagnostics/min_obstacle_distance_min"] = min_obstacle_dist.min()
+
 
 def _collection_metrics(
     rollout: Rollout,

@@ -117,17 +117,7 @@ class VMASNavigation(MultiAgentEnv):
         assert action.shape == (self.num_agents, self.action_dim)
         env_state: VMASNavigationState = graph.env_states
 
-        x_semidim = self.params["world_spawning_x"] if self.params["enforce_bounds"] else None
-        y_semidim = self.params["world_spawning_y"] if self.params["enforce_bounds"] else None
-        world = World(
-            dt=self.dt,
-            substeps=self.params["substeps"],
-            x_semidim=x_semidim,
-            y_semidim=y_semidim,
-            collision_force=self.params["collision_force"],
-            contact_margin=self.params["contact_margin"],
-        )
-
+        world = self._make_world()
         agents = self._make_agents(env_state, action)
         agents, _ = world.step(agents)
 
@@ -143,6 +133,18 @@ class VMASNavigation(MultiAgentEnv):
         done = jnp.array(False)
         info = {}
         return next_graph, reward, cost, done, info
+
+    def _make_world(self) -> World:
+        x_semidim = self.params["world_spawning_x"] if self.params["enforce_bounds"] else None
+        y_semidim = self.params["world_spawning_y"] if self.params["enforce_bounds"] else None
+        return World(
+            dt=self.dt,
+            substeps=self.params["substeps"],
+            x_semidim=x_semidim,
+            y_semidim=y_semidim,
+            collision_force=self.params["collision_force"],
+            contact_margin=self.params["contact_margin"],
+        )
 
     def _make_agents(
         self, env_state: VMASNavigationState, action: Action

@@ -615,3 +615,71 @@ cost = get_cost(graph)
 
 - 需要重新进行完整训练，观察 state-based cost 是否降低 eval unsafe rate；本次冒烟测试不能证明避碰效果已经改善。
 - 根据完整训练中的 `agent_speed_max` 和 `min_agent_distance_min` 再决定是否增加 `max_speed` 或 safety buffer，避免同时引入多项行为变化。
+
+## 2026-06-06：同步检查并修复 NavigationObs
+
+### 用户反馈
+
+- 在 navigation 完成最小 safety cost 修复后，检查 navigation_obs 是否存在需要同步适配的部分，并一起修复。
+
+### 对比检查结论
+
+- navigation_obs 已通过继承或自身实现同步以下 navigation 行为：
+  - `dt`、`substeps`、collision force、contact margin；
+  - agent 的 `u_multiplier`、drag、radius 和 Physax 构造；
+  - `enforce_bounds=False`；
+  - agent-agent 图边；
+  - state-based rollout cost。
+- agent-obstacle edge 方向正确：
+  - receiver 是 agent；
+  - sender 是 obstacle；
+  - 与原始 DGPPO 的 MPE/Lidar obstacle edge 范式一致。
+- 不需要重新加入 lidar。
+
+### 发现的问题
+
+1. navigation 和 navigation_obs 分别重复构造 `World`，后续修改物理参数时容易再次出现不同步。
+2. navigation_obs 原 reset 分别采样实体和目标：
+   - agents 与 obstacles 之间不会初始重叠；
+   - 但 goals 未避开 agents 和 obstacles；
+   - 目标可能生成在障碍物附近，造成任务不合理或诱导 agent 穿过障碍物。
+3. 通用诊断日志只有 agent-agent 最小距离，navigation_obs 缺少 agent-obstacle 最小距离。
+4. `make_env()` 原地修改类级 `PARAMS`，例如一次使用自定义 `n_obs` 后可能污染后续环境实例。
+
+### 实际修改
+
+1. 在 `VMASNavigation` 中增加公共 `_make_world()`，navigation 和 navigation_obs 均通过该方法构造 Physax World。
+2. navigation_obs reset 改为一次性联合采样：
+   - agents；
+   - obstacles；
+   - goals。
+3. 联合采样最小间距按 agent/obstacle 最大直径组合计算，并额外增加 `0.05`。
+4. navigation_obs 的 collection/eval 日志新增：
+   - `diagnostics/min_obstacle_distance_mean`
+   - `diagnostics/min_obstacle_distance_min`
+5. `make_env()` 改为复制类级 `PARAMS` 后再写入实例配置，避免跨实例污染。
+
+### 保持不变
+
+- Physax 碰撞计算；
+- reward 和 collision penalty；
+- safety cost 阈值与 margin；
+- state-based cost；
+- graph edge 方向和全连接范围；
+- 训练参数；
+- 无 lidar 的 graph observation 方案。
+
+### 验证结果
+
+- Python 静态编译检查通过。
+- 对 64 个 navigation_obs reset 批量检查：
+  - agents、obstacles、goals 的全局最小间距为 `0.2514`；
+  - 满足设定最小间距 `0.25`。
+- navigation 与 navigation_obs 的 JIT step 均通过。
+- navigation_obs 普通/JIT step 返回 cost 均与当前 graph 的 `get_cost(graph)` 一致。
+- `make_env(..., num_obs=7)` 后：
+  - 实例使用 `n_obs=7`；
+  - 类级默认值仍保持 `n_obs=3`。
+- navigation_obs 一轮最小训练冒烟测试通过。
+- collection/eval 的 obstacle 最小距离字段均成功写入 `metrics.csv`。
+- obstacle 场景首次 XLA 编译耗时较长，本次单 iter 冒烟测试总耗时约 7 分 23 秒；未发现运行时错误。
