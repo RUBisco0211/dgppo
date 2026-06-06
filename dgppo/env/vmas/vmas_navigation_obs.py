@@ -114,7 +114,7 @@ class VMASNavigationObs(VMASNavigation):
         env_state_new = env_state._replace(a_pos=a_pos, a_vel=a_vel)
         next_graph = self.get_graph(env_state_new)
         reward = self.get_reward(graph, env_state_new)
-        cost = self.get_transition_cost(env_state, env_state_new)
+        cost = self.get_cost(graph)
         done = jnp.array(False)
         info = {}
         return next_graph, reward, cost, done, info

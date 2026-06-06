@@ -348,6 +348,26 @@ def _add_cost_metrics(
         metrics[f"{prefix}/cost/{key_name}_mean"] = positive_costs[..., idx].mean()
 
 
+def _add_navigation_diagnostics(metrics: Dict[str, float], rollout: Rollout, prefix: str):
+    env_states = rollout.graph.env_states
+    a_pos = np.asarray(env_states.a_pos)
+    a_vel = np.asarray(env_states.a_vel)
+
+    speed = np.linalg.norm(a_vel, axis=-1)
+    pairwise_dist = np.linalg.norm(
+        a_pos[..., :, None, :] - a_pos[..., None, :, :],
+        axis=-1,
+    )
+    n_agents = a_pos.shape[-2]
+    pairwise_dist = pairwise_dist + np.eye(n_agents) * 1e6
+    min_agent_dist = pairwise_dist.min(axis=(-1, -2))
+
+    metrics[f"{prefix}/diagnostics/agent_speed_mean"] = speed.mean()
+    metrics[f"{prefix}/diagnostics/agent_speed_max"] = speed.max()
+    metrics[f"{prefix}/diagnostics/min_agent_distance_mean"] = min_agent_dist.mean()
+    metrics[f"{prefix}/diagnostics/min_agent_distance_min"] = min_agent_dist.min()
+
+
 def _collection_metrics(
     rollout: Rollout,
     iteration: int,
@@ -373,6 +393,7 @@ def _collection_metrics(
     _add_min_mean_max(metrics, "collection/agents/reward/episode_reward", episode_returns)
     _add_min_mean_max(metrics, "collection/reward/episode_reward", episode_returns)
     _add_cost_metrics(metrics, costs, "collection", cost_components)
+    _add_navigation_diagnostics(metrics, rollout, "collection")
     return metrics
 
 
@@ -409,6 +430,7 @@ def _eval_metrics(
     _add_min_mean_max(metrics, "eval/reward/episode_reward", returns)
     metrics["eval/reward/episode_len_mean"] = lengths.mean()
     _add_cost_metrics(metrics, costs, "eval", cost_components)
+    _add_navigation_diagnostics(metrics, rollouts, "eval")
     best_eval_reward = max(best_eval_reward, float(returns.mean()))
     metrics["eval/reward/best_episode_reward_mean"] = best_eval_reward
     return metrics, best_eval_reward

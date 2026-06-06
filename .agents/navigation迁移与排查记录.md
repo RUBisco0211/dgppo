@@ -572,3 +572,46 @@ cost = get_cost(graph)
 - 不修改全连接 graph。
 - 不修改 PPO epochs/lr/minibatch。
 - 不恢复 reward collision penalty。
+
+## 2026-06-06：实施最小 safety cost 修复并增加诊断日志
+
+### 实际修改
+
+1. `VMASNavigation.step()` 和 `VMASNavigationObs.step()` 的 rollout cost 从：
+
+   ```python
+   cost = self.get_transition_cost(env_state, env_state_new)
+   ```
+
+   恢复为原始 DGPPO 范式：
+
+   ```python
+   cost = self.get_cost(graph)
+   ```
+
+2. `train_navigation.py` 为 collection 和 eval 增加以下诊断指标：
+
+   - `diagnostics/agent_speed_mean`
+   - `diagnostics/agent_speed_max`
+   - `diagnostics/min_agent_distance_mean`
+   - `diagnostics/min_agent_distance_min`
+
+3. 未修改 Physax 物理实现、边界、reward、碰撞 penalty、`dt`、`alpha`、图连接方式和训练参数。
+
+### 验证结果
+
+- navigation 和 navigation_obs 的普通 `step`、`jax.jit(step)` 返回 cost 均与当前 graph 的 `get_cost(graph)` 一致。
+- 人工令两个 agent 重叠后：
+  - navigation 当前 cost 与 rollout 返回 cost 均为 `0.7`；
+  - navigation_obs 的 agent collision cost 当前值与 rollout 返回值也均为 `0.7`。
+- 使用 `mamba` 的 `dgppo` 环境完成 navigation 最小训练冒烟测试：
+  - 4 个并行环境；
+  - 每环境 10 步；
+  - 1 个训练 iter；
+  - 1 次 PPO epoch。
+- collection/eval 的 8 个新增诊断字段均已成功写入 `metrics.csv`。
+
+### 后续判断依据
+
+- 需要重新进行完整训练，观察 state-based cost 是否降低 eval unsafe rate；本次冒烟测试不能证明避碰效果已经改善。
+- 根据完整训练中的 `agent_speed_max` 和 `min_agent_distance_min` 再决定是否增加 `max_speed` 或 safety buffer，避免同时引入多项行为变化。
