@@ -69,7 +69,7 @@ def _parse_args() -> argparse.Namespace:
         default="online",
         help="wandb upload mode. Default is online for real-time server sync.",
     )
-    parser.add_argument("--project-name", default="benchmarl")
+    parser.add_argument("--project-name", default="dgppo")
     parser.add_argument("--name", default=None)
 
     parser.add_argument("--max-steps", type=int, default=None)

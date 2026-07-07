@@ -146,6 +146,7 @@ def internet(host="8.8.8.8", port=53, timeout=3):
 
 
 def is_connected():
+    return True
     return internet()
 
 
