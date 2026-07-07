@@ -21,6 +21,8 @@ from dgppo.utils.utils import save_anim, tree_index
 from dgppo.env.base import MultiAgentEnv
 from dgppo.env.utils import get_node_goal_rng
 
+VIDEO_FONT_FAMILY = "DejaVu Sans"
+
 
 class VMASWheelState(NamedTuple):
     line_angle: FloatScalar
@@ -373,7 +375,7 @@ class VMASWheel(MultiAgentEnv):
         text_font_opts = dict(
             size=16,
             color="k",
-            family="cursive",
+            family=VIDEO_FONT_FAMILY,
             weight="normal",
             transform=ax.transAxes,
         )

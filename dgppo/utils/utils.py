@@ -9,7 +9,7 @@ from datetime import timedelta
 from typing import Any, Callable, Iterable, ParamSpec, Sequence, TypeVar, Tuple, List, NamedTuple
 from jax import numpy as jnp, tree_util as jtu
 from jax._src.lib import xla_client as xc
-from matplotlib.animation import FuncAnimation
+from matplotlib.animation import FuncAnimation, writers
 from rich.progress import Progress, ProgressColumn
 from rich.text import Text
 
@@ -145,7 +145,18 @@ class CustomTimeElapsedColumn(ProgressColumn):
         return Text(delta_str, style="progress.elapsed")
 
 
-def save_anim(ani: FuncAnimation, path: pathlib.Path):
+def save_anim(ani: FuncAnimation, path: pathlib.Path) -> pathlib.Path:
+    path = pathlib.Path(path)
+    save_kwargs = {}
+    if path.suffix.lower() == ".mp4":
+        if writers.is_available("ffmpeg"):
+            save_kwargs["writer"] = "ffmpeg"
+        else:
+            path = path.with_suffix(".gif")
+            save_kwargs["writer"] = "pillow"
+    elif path.suffix.lower() == ".gif":
+        save_kwargs["writer"] = "pillow"
+
     pbar = Progress(*Progress.get_default_columns(), CustomTimeElapsedColumn())
     pbar.start()
     if hasattr(ani, "save_count"):
@@ -157,8 +168,9 @@ def save_anim(ani: FuncAnimation, path: pathlib.Path):
     def progress_callback(curr_frame: int, total_frames: int):
         pbar.update(task, advance=1)
 
-    ani.save(path, progress_callback=progress_callback)
+    ani.save(path, progress_callback=progress_callback, **save_kwargs)
     pbar.stop()
+    return path
 
 
 def tree_merge(data: List[NamedTuple]):
@@ -204,4 +216,3 @@ def assert_shape(arr: _Arr, shape: int | Shape, label: str | None = None) -> _Ar
 
 def tree_where(cond: BoolScalar | bool, true_val: _PyTree, false_val: _PyTree) -> _PyTree:
     return jtu.tree_map(lambda x, y: jnp.where(cond, x, y), true_val, false_val)
-

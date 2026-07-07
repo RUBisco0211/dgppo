@@ -20,6 +20,8 @@ from dgppo.env.lidar_env.base import LidarEnvState
 from dgppo.env.lidar_env.lidar_target import LidarTarget
 from dgppo.utils.utils import tree_index, MutablePatchCollection, save_anim
 
+VIDEO_FONT_FAMILY = "DejaVu Sans"
+
 
 class LidarBicycleTarget(LidarTarget):
 
@@ -197,7 +199,7 @@ class LidarBicycleTarget(LidarTarget):
         text_font_opts = dict(
             size=16,
             color="k",
-            family="cursive",
+            family=VIDEO_FONT_FAMILY,
             weight="normal",
             transform=ax.transAxes,
         )
@@ -213,7 +215,7 @@ class LidarBicycleTarget(LidarTarget):
         label_font_opts = dict(
             size=20,
             color="k",
-            family="cursive",
+            family=VIDEO_FONT_FAMILY,
             weight="normal",
             ha="center",
             va="center",

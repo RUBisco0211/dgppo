@@ -21,6 +21,8 @@ from ..utils.typing import EdgeIndex, Pos2d, Pos3d, Array
 from ..utils.utils import merge01, tree_index, MutablePatchCollection, save_anim
 from dgppo.env.obstacle import Cuboid, Sphere, Obstacle, Rectangle
 
+VIDEO_FONT_FAMILY = "DejaVu Sans"
+
 
 def plot_graph(
         ax: Axes,
@@ -302,7 +304,7 @@ def render_mpe(
     text_font_opts = dict(
         size=16,
         color="k",
-        family="cursive",
+        family=VIDEO_FONT_FAMILY,
         weight="normal",
         transform=ax.transAxes,
     )
@@ -329,7 +331,7 @@ def render_mpe(
     label_font_opts = dict(
         size=20,
         color="k",
-        family="cursive",
+        family=VIDEO_FONT_FAMILY,
         weight="normal",
         ha="center",
         va="center",
@@ -560,7 +562,7 @@ def render_lidar(
     text_font_opts = dict(
         size=16,
         color="k",
-        family="cursive",
+        family=VIDEO_FONT_FAMILY,
         weight="normal",
         transform=ax.transAxes,
     )
@@ -587,7 +589,7 @@ def render_lidar(
     label_font_opts = dict(
         size=20,
         color="k",
-        family="cursive",
+        family=VIDEO_FONT_FAMILY,
         weight="normal",
         ha="center",
         va="center",

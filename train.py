@@ -1,6 +1,11 @@
 import argparse
 import datetime
 import os
+
+# These must be set before importing modules that may import JAX/XLA.
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+os.environ.setdefault("TF_GPU_ALLOCATOR", "cuda_malloc_async")
+
 import ipdb
 import numpy as np
 import wandb
@@ -16,7 +21,6 @@ def train(args):
     print(f"> Running train.py {args}")
 
     # set up environment variables and seed
-    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
     if not is_connected():
         os.environ["WANDB_MODE"] = "offline"
     np.random.seed(args.seed)
@@ -39,6 +43,18 @@ def train(args):
         n_rays=args.n_rays,
         full_observation=args.full_observation,
     )
+
+    horizon = env.max_episode_steps
+    max_batch_size = args.n_env_train * horizon
+    envs_per_minibatch = max(1, min(args.n_env_train, args.batch_size // horizon))
+    adjusted_batch_size = envs_per_minibatch * horizon
+    if adjusted_batch_size != args.batch_size:
+        print(
+            f"> Adjusting batch_size from {args.batch_size} to {adjusted_batch_size}. "
+            f"It must be between {horizon} and {max_batch_size}, "
+            f"and is rounded to a multiple of max_episode_steps={horizon}."
+        )
+        args.batch_size = adjusted_batch_size
 
     # create algorithm
     algo = make_algo(
@@ -101,7 +117,10 @@ def train(args):
         "training_steps": args.steps,
         "eval_interval": args.eval_interval,
         "eval_epi": args.eval_epi,
-        "save_interval": args.save_interval
+        "save_interval": args.save_interval,
+        "video_interval": args.eval_interval,
+        "log_video": not args.no_video and not args.debug,
+        "video_dpi": args.video_dpi,
     }
 
     # create trainer
@@ -174,9 +193,11 @@ def main():
     parser.add_argument("--batch-size", type=int, default=16384)
     parser.add_argument("--n-env-test", type=int, default=32)
     parser.add_argument("--log-dir", type=str, default="./logs")
-    parser.add_argument("--eval-interval", type=int, default=50)
+    parser.add_argument("--eval-interval", type=int, default=1000)
     parser.add_argument("--eval-epi", type=int, default=1)
-    parser.add_argument("--save-interval", type=int, default=50)
+    parser.add_argument("--save-interval", type=int, default=1000)
+    parser.add_argument("--no-video", action="store_true", default=False)
+    parser.add_argument("--video-dpi", type=int, default=100)
 
     args = parser.parse_args()
     train(args)
