@@ -89,7 +89,16 @@ def train(args):
         lr_lagr=args.lr_lagr,
         train_steps=args.steps,
         cbf_schedule=not args.no_cbf_schedule,
-        cost_schedule=args.cost_schedule
+        cost_schedule=args.cost_schedule,
+        manifold_top_k_obs=args.manifold_top_k_obs,
+        manifold_safety_margin=args.manifold_safety_margin,
+        manifold_braking_accel=args.manifold_braking_accel,
+        manifold_velocity_margin=args.manifold_velocity_margin,
+        manifold_contraction_gain=args.manifold_contraction_gain,
+        manifold_slack_min=args.manifold_slack_min,
+        manifold_slack_beta=args.manifold_slack_beta,
+        manifold_slack_weight=args.manifold_slack_weight,
+        manifold_reg=args.manifold_reg,
     )
 
     # Generate a 4 letter random identifier for the run.
@@ -175,6 +184,17 @@ def main():
     parser.add_argument("--no-cbf-schedule", action="store_true", default=False)
     parser.add_argument("--cost-schedule", action="store_true", default=False)
     parser.add_argument("--no-rnn", action="store_true", default=False)
+
+    # one-step constraint manifold filter arguments
+    parser.add_argument("--manifold-top-k-obs", type=int, default=3)
+    parser.add_argument("--manifold-safety-margin", type=float, default=0.02)
+    parser.add_argument("--manifold-braking-accel", type=float, default=1.0)
+    parser.add_argument("--manifold-velocity-margin", type=float, default=0.02)
+    parser.add_argument("--manifold-contraction-gain", type=float, default=30.0)
+    parser.add_argument("--manifold-slack-min", type=float, default=0.1)
+    parser.add_argument("--manifold-slack-beta", type=float, default=1.0)
+    parser.add_argument("--manifold-slack-weight", type=float, default=10.0)
+    parser.add_argument("--manifold-reg", type=float, default=1e-5)
 
     # NN arguments
     parser.add_argument("--actor-gnn-layers", type=int, default=2)
