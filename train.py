@@ -17,6 +17,36 @@ from dgppo.trainer.trainer import Trainer
 from dgppo.trainer.utils import is_connected
 
 
+def _resolve_resume_checkpoint(resume_dir: str, resume_step: str):
+    resume_dir = os.path.normpath(resume_dir)
+    if os.path.exists(os.path.join(resume_dir, "actor.pkl")):
+        return os.path.dirname(resume_dir), os.path.basename(resume_dir)
+    if os.path.isdir(os.path.join(resume_dir, "models")):
+        return os.path.join(resume_dir, "models"), resume_step
+    return resume_dir, resume_step
+
+
+def _checkpoint_iter(load_dir: str, step: str):
+    candidate_dirs = []
+    if os.path.isdir(os.path.join(load_dir, str(step))):
+        candidate_dirs.append(os.path.join(load_dir, str(step)))
+    if os.path.isdir(load_dir):
+        candidate_dirs.append(load_dir)
+
+    for iter_dir in candidate_dirs:
+        for name in sorted(os.listdir(iter_dir), reverse=True):
+            if name.startswith("latest_iter_") and name.endswith(".txt"):
+                return int(name[len("latest_iter_"):-len(".txt")])
+
+    ckpt_dir = os.path.join(load_dir, str(step))
+    if not os.path.isdir(ckpt_dir):
+        return None
+    for name in sorted(os.listdir(ckpt_dir)):
+        if name.startswith("iter_") and name.endswith(".ckpt"):
+            return int(name[len("iter_"):-len(".ckpt")])
+    return None
+
+
 def train(args):
     print(f"> Running train.py {args}")
 
@@ -101,6 +131,20 @@ def train(args):
         manifold_reg=args.manifold_reg,
     )
 
+    start_step = 0
+    if args.resume_dir is not None:
+        load_dir, load_step = _resolve_resume_checkpoint(args.resume_dir, args.resume_step)
+        print(f"> Resuming weights from {os.path.join(load_dir, str(load_step))}")
+        resume_iter = _checkpoint_iter(load_dir, load_step)
+        if resume_iter is not None:
+            start_step = resume_iter
+            print(f"> Found checkpoint iteration: {resume_iter}. Target iteration: {args.steps}.")
+            if start_step > args.steps:
+                raise ValueError(f"resume iter {start_step} is greater than target --steps {args.steps}")
+        else:
+            print("> No checkpoint iteration file found; resuming from iteration 0.")
+        algo.load(load_dir, load_step)
+
     # Generate a 4 letter random identifier for the run.
     rng_ = np.random.default_rng()
     rand_id = "".join([chr(rng_.integers(65, 91)) for _ in range(4)])
@@ -130,6 +174,7 @@ def train(args):
         "video_interval": args.eval_interval,
         "log_video": not args.no_video and not args.debug,
         "video_dpi": args.video_dpi,
+        "start_step": start_step,
     }
 
     # create trainer
@@ -172,6 +217,8 @@ def main():
     parser.add_argument("--steps", type=int, default=200000)
     parser.add_argument("--name", type=str, default=None)
     parser.add_argument("--debug", action="store_true", default=False)
+    parser.add_argument("--resume-dir", type=str, default=None)
+    parser.add_argument("--resume-step", type=str, default="latest")
     parser.add_argument("--cost-weight", type=float, default=0.)
     parser.add_argument("--n-rays", type=int, default=32)
     parser.add_argument('--full-observation', action='store_true', default=False)

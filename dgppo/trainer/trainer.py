@@ -150,6 +150,7 @@ class Trainer:
         self.video_interval = params.get('video_interval', self.eval_interval)
         self.log_video = params.get('log_video', True)
         self.video_dpi = params.get('video_dpi', 100)
+        self.start_step = params.get('start_step', 0)
         self.best_eval_reward = -np.inf
 
         self.update_steps = 0
@@ -165,9 +166,10 @@ class Trainer:
         assert params['eval_epi'] >= 1, 'eval_epi must be greater than or equal to 1'
         assert 'save_interval' in params, 'save_interval not found in params'
         assert params['save_interval'] > 0, 'save_interval must be positive'
+        assert params.get('start_step', 0) >= 0, 'start_step must be non-negative'
         return True
 
-    def _save_latest_checkpoint(self):
+    def _save_latest_checkpoint(self, step: int):
         latest_dir = os.path.join(self.model_dir, 'latest')
         if os.path.exists(latest_dir):
             shutil.rmtree(latest_dir)
@@ -180,6 +182,7 @@ class Trainer:
             else:
                 os.remove(path)
         self.algo.save(self.model_dir, 'latest')
+        pathlib.Path(latest_dir, f"latest_iter_{int(step):09d}.txt").touch()
 
     def _eval_video(self, rollouts: Rollout, step: int):
         if not self.save_log or not self.log_video or step % self.video_interval != 0:
@@ -218,8 +221,9 @@ class Trainer:
         assert self.eval_epi <= 1_000, 'eval_epi must be less than or equal to 1_000'
         test_keys = jr.split(test_key, 1_000)[:self.eval_epi]
 
-        pbar = tqdm(total=self.steps, ncols=80)
-        for step in range(0, self.steps + 1):
+        remaining_steps = max(0, self.steps - self.start_step)
+        pbar = tqdm(total=remaining_steps + 1, initial=0, ncols=80)
+        for step in range(self.start_step, self.steps + 1):
             total_frames = step * self.n_env_train * self.env.max_episode_steps
             log_info = {
                 "general/iteration": step,
@@ -257,7 +261,7 @@ class Trainer:
 
             # save the model
             if self.save_log and step % self.save_interval == 0:
-                self._save_latest_checkpoint()
+                self._save_latest_checkpoint(step)
 
             # collect rollouts
             key_x0, self.key = jax.random.split(self.key)
