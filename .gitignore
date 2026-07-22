@@ -5,3 +5,4 @@ wandb
 logs
 *.egg-info
 outputs/*
+.papers
