@@ -29,6 +29,11 @@ class LidarEnvState(NamedTuple):
         return self.agent.shape[0]
 
 
+class AgentControlAffineDynamics(NamedTuple):
+    drift: AgentState
+    control_matrix: Float[Array, "n_agent agent_state_dim action_dim"]
+
+
 LidarEnvGraphsTuple = GraphsTuple[State, LidarEnvState]
 
 
@@ -139,11 +144,41 @@ class LidarEnv(MultiAgentEnv, ABC):
             assert lidar_data.shape == (self.num_agents, self._params["top_k_rays"], 2)
         return lidar_data
 
+    def agent_control_affine_dynamics(self, agent_states: AgentState) -> AgentControlAffineDynamics:
+        """Return continuous-time dynamics x_dot = f(x) + G(x) u.
+
+        The default LidarEnv dynamics are a double integrator with state
+        [x, y, vx, vy] and action [ax, ay]. The environment scales action by 10
+        before integrating, matching agent_step_euler().
+        """
+        assert agent_states.shape == (self.num_agents, self.state_dim)
+        drift = jnp.concatenate(
+            [agent_states[:, 2:], jnp.zeros((self.num_agents, self.action_dim), dtype=agent_states.dtype)],
+            axis=1,
+        )
+        control_matrix = jnp.zeros((self.num_agents, self.state_dim, self.action_dim), dtype=agent_states.dtype)
+        acceleration_matrix = jnp.broadcast_to(
+            jnp.eye(self.action_dim, dtype=agent_states.dtype) * 10.0,
+            (self.num_agents, self.action_dim, self.action_dim),
+        )
+        control_matrix = control_matrix.at[:, 2:, :].set(acceleration_matrix)
+        assert drift.shape == (self.num_agents, self.state_dim)
+        assert control_matrix.shape == (self.num_agents, self.state_dim, self.action_dim)
+        return AgentControlAffineDynamics(drift=drift, control_matrix=control_matrix)
+
+    def agent_dynamics(self, agent_states: AgentState, action: Action) -> AgentState:
+        """Return continuous-time x_dot for the current action."""
+        assert action.shape == (self.num_agents, self.action_dim)
+        dynamics = self.agent_control_affine_dynamics(agent_states)
+        x_dot = dynamics.drift + jnp.einsum("nsu,nu->ns", dynamics.control_matrix, action)
+        assert x_dot.shape == (self.num_agents, self.state_dim)
+        return x_dot
+
     def agent_step_euler(self, agent_states: AgentState, action: Action) -> AgentState:
         """By default, use double integrator dynamics"""
         assert action.shape == (self.num_agents, self.action_dim)
         assert agent_states.shape == (self.num_agents, self.state_dim)
-        x_dot = jnp.concatenate([agent_states[:, 2:], action * 10.], axis=1)
+        x_dot = self.agent_dynamics(agent_states, action)
         n_state_agent_new = x_dot * self.dt + agent_states
         assert n_state_agent_new.shape == (self.num_agents, self.state_dim)
         return self.clip_state(n_state_agent_new)

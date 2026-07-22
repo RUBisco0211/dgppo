@@ -16,7 +16,7 @@ from dgppo.env.utils import get_node_goal_rng
 from dgppo.trainer.data import Rollout
 from dgppo.utils.graph import GraphsTuple
 from dgppo.utils.typing import Action, Array, State, AgentState
-from dgppo.env.lidar_env.base import LidarEnvState
+from dgppo.env.lidar_env.base import AgentControlAffineDynamics, LidarEnvState
 from dgppo.env.lidar_env.lidar_target import LidarTarget
 from dgppo.utils.utils import tree_index, MutablePatchCollection, save_anim
 
@@ -58,6 +58,36 @@ class LidarBicycleTarget(LidarTarget):
     @property
     def action_dim(self) -> int:
         return 2  # omega, acc
+
+    def agent_control_affine_dynamics(self, agent_states: AgentState) -> AgentControlAffineDynamics:
+        """Return continuous-time bicycle dynamics x_dot = f(x) + G(x) u.
+
+        State is [x, y, cos(theta), sin(theta), v], action is [omega, acc].
+        This is the control-affine continuous-time model corresponding to the
+        Euler update in agent_step_euler().
+        """
+        assert agent_states.shape == (self.num_agents, self.state_dim)
+        cos_theta = agent_states[:, 2]
+        sin_theta = agent_states[:, 3]
+        speed = agent_states[:, 4]
+
+        drift = jnp.stack(
+            [
+                speed * cos_theta,
+                speed * sin_theta,
+                jnp.zeros_like(speed),
+                jnp.zeros_like(speed),
+                jnp.zeros_like(speed),
+            ],
+            axis=1,
+        )
+        control_matrix = jnp.zeros((self.num_agents, self.state_dim, self.action_dim), dtype=agent_states.dtype)
+        control_matrix = control_matrix.at[:, 2, 0].set(-sin_theta * speed * 10.0)
+        control_matrix = control_matrix.at[:, 3, 0].set(cos_theta * speed * 10.0)
+        control_matrix = control_matrix.at[:, 4, 1].set(10.0)
+        assert drift.shape == (self.num_agents, self.state_dim)
+        assert control_matrix.shape == (self.num_agents, self.state_dim, self.action_dim)
+        return AgentControlAffineDynamics(drift=drift, control_matrix=control_matrix)
 
     def reset(self, key: Array) -> GraphsTuple:
         # randomly generate obstacles
