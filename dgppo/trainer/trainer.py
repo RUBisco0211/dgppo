@@ -221,8 +221,7 @@ class Trainer:
         assert self.eval_epi <= 1_000, 'eval_epi must be less than or equal to 1_000'
         test_keys = jr.split(test_key, 1_000)[:self.eval_epi]
 
-        remaining_steps = max(0, self.steps - self.start_step)
-        pbar = tqdm(total=remaining_steps + 1, initial=0, ncols=80)
+        pbar = tqdm(total=self.steps, initial=self.start_step, ncols=80)
         for step in range(self.start_step, self.steps + 1):
             total_frames = step * self.n_env_train * self.env.max_episode_steps
             log_info = {
@@ -276,4 +275,5 @@ class Trainer:
             wandb.log(_wandb_scalars(log_info) | media_info, step=self.update_steps)
             self.update_steps += 1
 
-            pbar.update(1)
+            if step < self.steps:
+                pbar.update(1)
