@@ -117,7 +117,11 @@ def _single_agent_project(
     # J_h G 是 h_dot = psi + J_h G u 中 action 对约束变化率的雅可比。
     action_jac = dh_down @ own_control_matrix
     slack = jnp.maximum(-h, slack_min)
-    slack_actuation = jnp.exp(slack_beta * slack) - 1.0
+    # slack 代表“离约束边界有多远”。距离很远时 slack 会很大，但此时
+    # 约束残差 c 已经接近 0，不需要让 exp(slack) 继续变大；否则远距离
+    # agent-agent 约束会把投影矩阵撑到 inf，随后 pinv 产生 NaN。
+    slack_exp_arg = jnp.clip(slack_beta * slack, a_max=20.0)
+    slack_actuation = jnp.expm1(slack_exp_arg)
 
     # 对 slack 坐标做缩放。slack_weight 越大，投影越倾向于先修正真实 action，
     # 而不是依赖虚拟 slack 控制来满足等式。
@@ -134,7 +138,7 @@ def _single_agent_project(
     correction = j_aug.T @ (jnp.linalg.pinv(gram) @ residual)
     u_safe_aug = u_ref_aug - correction
     # 只执行真实物理 action；虚拟 slack 控制只参与投影计算，最后丢弃。
-    return u_safe_aug[:env.action_dim]
+    return jnp.nan_to_num(u_safe_aug[:env.action_dim], nan=0.0, posinf=1.0, neginf=-1.0)
 
 
 def lidar_manifold_project(
@@ -237,4 +241,4 @@ def lidar_manifold_project(
 
     action_safe = jnp.stack(projected_actions, axis=0)
     assert action_safe.shape == action_ref.shape
-    return env.clip_action(action_safe)
+    return jnp.nan_to_num(env.clip_action(action_safe), nan=0.0, posinf=1.0, neginf=-1.0)

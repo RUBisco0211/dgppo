@@ -102,6 +102,7 @@ class InforMARLManifold(InforMARL):
             log_pi_safe, _, _ = self.policy.eval_action(
                 params["policy"], graph, action_safe, rnn_state, key_
             )
+            log_pi_safe = jnp.nan_to_num(log_pi_safe)
             next_graph, reward, cost, done, info = self._env.step(graph, action_safe)
             return (
                 (next_graph, new_rnn_state),
@@ -152,5 +153,7 @@ class InforMARLManifold(InforMARL):
             "manifold/reprojected_action_norm": jnp.linalg.norm(action_reprojected, axis=-1).mean(),
             "manifold/action_delta_norm": jnp.linalg.norm(action_delta, axis=-1).mean(),
             "manifold/action_clip_frac": (jnp.abs(rollout.actions) >= 1.0 - 1e-6).mean(),
+            "manifold/action_nan_frac": jnp.isnan(rollout.actions).mean(),
+            "manifold/reward_nan_frac": jnp.isnan(rollout.rewards).mean(),
         }
         return super().update(rollout, step) | filter_info
