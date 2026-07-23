@@ -9,15 +9,17 @@ from .module.manifold_filter import lidar_manifold_project
 from ..env.lidar_env.base import LidarEnv
 from ..trainer.data import Rollout
 from ..utils.graph import GraphsTuple
+from ..utils.utils import jax_vmap
 from ..utils.typing import Action, Array, PRNGKey, Params
 
 
 class InforMARLManifold(InforMARL):
     """InforMARL with a one-step constraint-manifold safety filter.
 
-    The actor still learns a nominal single-step action. Before execution, the
-    nominal action is projected through a model-based LidarEnv manifold filter.
-    The PPO log probability remains the nominal action log probability.
+    The actor still proposes a nominal single-step action. Before execution,
+    the nominal action is projected through a model-based LidarEnv manifold
+    filter. The rollout stores the executed action so PPO optimizes the action
+    that actually produced the observed reward.
     """
 
     def __init__(
@@ -93,24 +95,27 @@ class InforMARLManifold(InforMARL):
 
         def body(data, key_):
             graph, rnn_state = data
-            action_ref, log_pi, new_rnn_state = self.policy_train_state.apply_fn(
+            action_ref, _, new_rnn_state = self.policy_train_state.apply_fn(
                 params["policy"], graph, rnn_state, key_
             )
             action_safe = self.project_action(graph, action_ref)
+            log_pi_safe, _, _ = self.policy.eval_action(
+                params["policy"], graph, action_safe, rnn_state, key_
+            )
             next_graph, reward, cost, done, info = self._env.step(graph, action_safe)
             return (
                 (next_graph, new_rnn_state),
-                (graph, action_ref, rnn_state, reward, cost, done, log_pi, next_graph),
+                (graph, action_safe, rnn_state, reward, cost, done, log_pi_safe, next_graph),
             )
 
         keys = jax.random.split(key, self._env.max_episode_steps)
-        _, (graphs, actions_ref, rnn_states, rewards, costs, dones, log_pis, next_graphs) = jax.lax.scan(
+        _, (graphs, actions_safe, rnn_states, rewards, costs, dones, log_pis, next_graphs) = jax.lax.scan(
             body,
             (init_graph, self.init_rnn_state),
             keys,
             length=self._env.max_episode_steps,
         )
-        return Rollout(graphs, actions_ref, rnn_states, rewards, costs, dones, log_pis, next_graphs)
+        return Rollout(graphs, actions_safe, rnn_states, rewards, costs, dones, log_pis, next_graphs)
 
     def act(
             self,
@@ -131,8 +136,21 @@ class InforMARLManifold(InforMARL):
     ) -> Tuple[Action, Array, Array]:
         if params is None:
             params = self.params
-        action_ref, log_pi, rnn_state = self.policy_train_state.apply_fn(params["policy"], graph, rnn_state, key)
+        rnn_state_in = rnn_state
+        action_ref, _, rnn_state = self.policy_train_state.apply_fn(params["policy"], graph, rnn_state, key)
         assert action_ref.shape == (self.n_agents, self.action_dim)
         action_safe = self.project_action(graph, action_ref)
-        log_pi = jnp.nan_to_num(log_pi)
-        return action_safe, log_pi, rnn_state
+        log_pi_safe, _, _ = self.policy.eval_action(params["policy"], graph, action_safe, rnn_state_in, key)
+        log_pi_safe = jnp.nan_to_num(log_pi_safe)
+        return action_safe, log_pi_safe, rnn_state
+
+    def update(self, rollout: Rollout, step: int) -> dict:
+        action_reprojected = jax_vmap(jax_vmap(self.project_action))(rollout.graph, rollout.actions)
+        action_delta = action_reprojected - rollout.actions
+        filter_info = {
+            "manifold/executed_action_norm": jnp.linalg.norm(rollout.actions, axis=-1).mean(),
+            "manifold/reprojected_action_norm": jnp.linalg.norm(action_reprojected, axis=-1).mean(),
+            "manifold/action_delta_norm": jnp.linalg.norm(action_delta, axis=-1).mean(),
+            "manifold/action_clip_frac": (jnp.abs(rollout.actions) >= 1.0 - 1e-6).mean(),
+        }
+        return super().update(rollout, step) | filter_info
