@@ -181,7 +181,7 @@ def _single_agent_project(
     # 约束漂移 psi 收集 h_dot 中不受当前 agent action 控制的部分：
     # 当前 agent 的被动动力学，以及邻居实体的运动。
     psi_own = dh_down @ own_drift
-    psi_entities = jnp.einsum("mns,ns->m", dh_dentities, entity_drift)
+    psi_entities = jnp.einsum("ms,ms->m", dh_dentities, entity_drift)
     psi = psi_own + psi_entities
 
     # J_h G 是 h_dot = psi + J_h G u 中 action 对约束变化率的雅可比。
