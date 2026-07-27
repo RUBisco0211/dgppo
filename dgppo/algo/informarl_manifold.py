@@ -5,7 +5,11 @@ import jax
 import jax.numpy as jnp
 
 from .informarl import InforMARL
-from .module.manifold_filter import lidar_manifold_project
+from .module.manifold_filter import (
+    lidar_manifold_init_slack,
+    lidar_manifold_project,
+    lidar_manifold_project_with_slack,
+)
 from ..env.lidar_env.base import LidarEnv
 from ..trainer.data import Rollout
 from ..utils.graph import GraphsTuple
@@ -89,32 +93,99 @@ class InforMARLManifold(InforMARL):
         assert action_safe.shape == (self.n_agents, self.action_dim)
         return action_safe
 
+    def init_filter_state(self, graph: GraphsTuple, env: Optional[LidarEnv] = None) -> Array:
+        if env is None:
+            env = self._env
+        return lidar_manifold_init_slack(
+            env=env,
+            graph=graph,
+            top_k_obs=self.manifold_top_k_obs,
+            safety_margin=self.manifold_safety_margin,
+            braking_accel=self.manifold_braking_accel,
+            velocity_margin=self.manifold_velocity_margin,
+            slack_min=self.manifold_slack_min,
+        )
+
+    def project_action_with_state(
+            self,
+            graph: GraphsTuple,
+            action_ref: Action,
+            filter_state: Array,
+            env: Optional[LidarEnv] = None,
+    ) -> Tuple[Action, Array]:
+        if env is None:
+            env = self._env
+        action_safe, next_filter_state = lidar_manifold_project_with_slack(
+            env=env,
+            graph=graph,
+            action_ref=action_ref,
+            slack_state=filter_state,
+            top_k_obs=self.manifold_top_k_obs,
+            safety_margin=self.manifold_safety_margin,
+            braking_accel=self.manifold_braking_accel,
+            velocity_margin=self.manifold_velocity_margin,
+            contraction_gain=self.manifold_contraction_gain,
+            slack_min=self.manifold_slack_min,
+            slack_beta=self.manifold_slack_beta,
+            slack_weight=self.manifold_slack_weight,
+            reg=self.manifold_reg,
+        )
+        assert action_safe.shape == (self.n_agents, self.action_dim)
+        return action_safe, next_filter_state
+
     def rollout_with_filter(self, params: Params, key: PRNGKey) -> Rollout:
         key_x0, _, key = jax.random.split(key, 3)
         init_graph = self._env.reset(key_x0)
+        init_filter_state = self.init_filter_state(init_graph)
 
         def body(data, key_):
-            graph, rnn_state = data
+            graph, rnn_state, filter_state = data
             action_ref, _, new_rnn_state = self.policy_train_state.apply_fn(
                 params["policy"], graph, rnn_state, key_
             )
-            action_safe = self.project_action(graph, action_ref)
+            action_safe, next_filter_state = self.project_action_with_state(graph, action_ref, filter_state)
             log_pi_safe, _, _ = self.policy.eval_action(
                 params["policy"], graph, action_safe, rnn_state, key_
             )
             log_pi_safe = jnp.nan_to_num(log_pi_safe)
             next_graph, reward, cost, done, info = self._env.step(graph, action_safe)
             return (
-                (next_graph, new_rnn_state),
+                (next_graph, new_rnn_state, next_filter_state),
                 (graph, action_safe, rnn_state, reward, cost, done, log_pi_safe, next_graph),
             )
 
         keys = jax.random.split(key, self._env.max_episode_steps)
         _, (graphs, actions_safe, rnn_states, rewards, costs, dones, log_pis, next_graphs) = jax.lax.scan(
             body,
-            (init_graph, self.init_rnn_state),
+            (init_graph, self.init_rnn_state, init_filter_state),
             keys,
             length=self._env.max_episode_steps,
+        )
+        return Rollout(graphs, actions_safe, rnn_states, rewards, costs, dones, log_pis, next_graphs)
+
+    def eval_rollout_with_filter(self, env: LidarEnv, params: Params, key: PRNGKey) -> Rollout:
+        key_x0, key = jax.random.split(key)
+        init_graph = env.reset(key_x0)
+        init_filter_state = self.init_filter_state(init_graph, env=env)
+
+        def body(data, key_):
+            graph, rnn_state, filter_state = data
+            action_ref, new_rnn_state = self.policy.get_action(params["policy"], graph, rnn_state)
+            action_safe, next_filter_state = self.project_action_with_state(
+                graph, action_ref, filter_state, env=env
+            )
+            next_graph, reward, cost, done, info = env.step(graph, action_safe)
+            return (
+                (next_graph, new_rnn_state, next_filter_state),
+                (graph, action_safe, rnn_state, reward, cost, done, None, next_graph),
+            )
+
+        keys = jax.random.split(key, env.max_episode_steps)
+        _, (graphs, actions_safe, rnn_states, rewards, costs, dones, log_pis, next_graphs) = jax.lax.scan(
+            body,
+            (init_graph, self.init_rnn_state, init_filter_state),
+            keys,
+            length=env.max_episode_steps,
         )
         return Rollout(graphs, actions_safe, rnn_states, rewards, costs, dones, log_pis, next_graphs)
 

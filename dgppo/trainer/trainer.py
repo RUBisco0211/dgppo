@@ -204,14 +204,18 @@ class Trainer:
         # preprocess the rollout function
         init_rnn_state = self.algo.init_rnn_state
 
-        def test_fn_single(params, key):
-            act_fn = ft.partial(self.algo.act, params=params)
-            return test_rollout(
-                self.env_test,
-                act_fn,
-                init_rnn_state,
-                key
-            )
+        if hasattr(self.algo, "eval_rollout_with_filter"):
+            def test_fn_single(params, key):
+                return self.algo.eval_rollout_with_filter(self.env_test, params, key)
+        else:
+            def test_fn_single(params, key):
+                act_fn = ft.partial(self.algo.act, params=params)
+                return test_rollout(
+                    self.env_test,
+                    act_fn,
+                    init_rnn_state,
+                    key
+                )
 
         test_fn = lambda params, keys: jax.vmap(ft.partial(test_fn_single, params))(keys)
         test_fn = jax.jit(test_fn)

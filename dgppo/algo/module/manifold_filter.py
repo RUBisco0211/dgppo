@@ -1,4 +1,5 @@
 import functools as ft
+from typing import Tuple
 
 import jax
 import jax.numpy as jnp
@@ -81,6 +82,7 @@ def _single_agent_project(
         entity_drift: AgentState,
         active: Array,
         safe_radius: Array,
+        mu: Array,
         u_ref: Array,
         braking_accel: float,
         velocity_margin: float,
@@ -89,7 +91,7 @@ def _single_agent_project(
         slack_beta: float,
         slack_weight: float,
         reg: float,
-) -> Array:
+) -> Tuple[Array, Array]:
     # 固定 h 中的静态参数，让自动微分只对本 agent 状态和邻居状态求导。
     h_fn = ft.partial(
         _pairwise_collision_h,
@@ -99,9 +101,11 @@ def _single_agent_project(
         velocity_margin=velocity_margin,
     )
     h = h_fn(own_state, entity_states)
-    # 单步版本的流形残差 c = h + mu。这里没有把 mu 作为状态跨时间维护，
-    # 因此每个环境步都根据当前 h 重新构造一个严格为正的 slack。
-    c = h + jnp.maximum(-h, slack_min)
+    # 流形残差 c = h + mu。mu 不放进环境状态，而是由算法 rollout 的
+    # scan carry 单独维护，这样可以保持论文里增广状态的时间连续性。
+    mu = jnp.where(active, mu, jnp.maximum(-h, slack_min))
+    mu = jnp.clip(jnp.nan_to_num(mu, nan=slack_min, posinf=50.0, neginf=slack_min), slack_min, 50.0)
+    c = h + mu
 
     # 线性化约束。dh_down 把当前 agent 的状态速度映射到 h_dot；
     # dh_dentities 把运动邻居的状态速度映射到漂移项。
@@ -116,11 +120,10 @@ def _single_agent_project(
 
     # J_h G 是 h_dot = psi + J_h G u 中 action 对约束变化率的雅可比。
     action_jac = dh_down @ own_control_matrix
-    slack = jnp.maximum(-h, slack_min)
-    # slack 代表“离约束边界有多远”。距离很远时 slack 会很大，但此时
-    # 约束残差 c 已经接近 0，不需要让 exp(slack) 继续变大；否则远距离
+    # mu 代表“离约束边界有多远”。距离很远时 mu 会很大，但此时
+    # 约束残差 c 通常接近 0，不需要让 exp(mu) 继续变大；否则远距离
     # agent-agent 约束会把投影矩阵撑到 inf，随后 pinv 产生 NaN。
-    slack_exp_arg = jnp.clip(slack_beta * slack, a_max=20.0)
+    slack_exp_arg = jnp.clip(slack_beta * mu, a_max=20.0)
     slack_actuation = jnp.expm1(slack_exp_arg)
 
     # 对 slack 坐标做缩放。slack_weight 越大，投影越倾向于先修正真实 action，
@@ -137,8 +140,106 @@ def _single_agent_project(
     gram = j_aug @ j_aug.T + reg * jnp.eye(j_aug.shape[0], dtype=j_aug.dtype)
     correction = j_aug.T @ (jnp.linalg.pinv(gram) @ residual)
     u_safe_aug = u_ref_aug - correction
-    # 只执行真实物理 action；虚拟 slack 控制只参与投影计算，最后丢弃。
-    return jnp.nan_to_num(u_safe_aug[:env.action_dim], nan=0.0, posinf=1.0, neginf=-1.0)
+    u_safe_aug = jnp.nan_to_num(u_safe_aug, nan=0.0, posinf=1.0, neginf=-1.0)
+    v_mu = u_safe_aug[env.action_dim:]
+    # 虚拟 slack 控制只在 filter 内部积分，不写回环境。
+    mu_next = mu + env.dt * slack_actuation * v_mu
+    mu_next = jnp.clip(jnp.nan_to_num(mu_next, nan=slack_min, posinf=50.0, neginf=slack_min), slack_min, 50.0)
+    mu_reset = jnp.maximum(-h, slack_min)
+    mu_next = jnp.where(active, mu_next, mu_reset)
+    # 只执行真实物理 action；虚拟 slack 控制最后丢弃。
+    return u_safe_aug[:env.action_dim], mu_next
+
+
+def _constraint_counts(env: LidarEnv, top_k_obs: int) -> Tuple[int, int, int]:
+    n_agent_constraints = env.num_agents - 1
+    n_obs_constraints = min(top_k_obs, env.params["top_k_rays"]) if env.params["n_obs"] > 0 else 0
+    return n_agent_constraints, n_obs_constraints, n_agent_constraints + n_obs_constraints
+
+
+def _agent_constraint_data(
+        env: LidarEnv,
+        graph: GraphsTuple,
+        agent_states: AgentState,
+        obs_states_all: Array,
+        i_agent: int,
+        top_k_obs: int,
+        n_agent_constraints: int,
+        n_obs_constraints: int,
+        safety_margin: float,
+) -> Tuple[AgentState, AgentState, Array, Array]:
+    other_ids = [idx for idx in range(env.num_agents) if idx != i_agent]
+    entities = []
+    entity_drifts = []
+    active = []
+    safe_radius = []
+    if n_agent_constraints > 0:
+        # agent-agent 约束使用双倍半径，因为两个 agent 都有物理尺寸。
+        other_states = agent_states[jnp.array(other_ids)]
+        entities.append(other_states)
+        entity_drifts.append(_entity_drift(other_states, env.state_dim))
+        active.append(jnp.ones((n_agent_constraints,), dtype=bool))
+        safe_radius.append(jnp.ones((n_agent_constraints,), dtype=agent_states.dtype) *
+                           (2.0 * env.params["car_radius"] + safety_margin))
+
+    if n_obs_constraints > 0:
+        # agent-obstacle 约束把 lidar hit point 当作静态实体；
+        # 超出通信半径的 hit point 标记为 inactive。
+        obs_states = obs_states_all[i_agent, :top_k_obs]
+        obs_dist = jnp.linalg.norm(obs_states[:, :2] - agent_states[i_agent, None, :2], axis=-1)
+        obs_active = obs_dist < env.params["comm_radius"]
+        entities.append(obs_states)
+        entity_drifts.append(jnp.zeros_like(obs_states))
+        active.append(obs_active)
+        safe_radius.append(jnp.ones((n_obs_constraints,), dtype=agent_states.dtype) *
+                           (env.params["car_radius"] + safety_margin))
+
+    return (
+        jnp.concatenate(entities, axis=0),
+        jnp.concatenate(entity_drifts, axis=0),
+        jnp.concatenate(active, axis=0),
+        jnp.concatenate(safe_radius, axis=0),
+    )
+
+
+def lidar_manifold_init_slack(
+        env: LidarEnv,
+        graph: GraphsTuple,
+        *,
+        top_k_obs: int = 3,
+        safety_margin: float = 0.02,
+        braking_accel: float = 1.0,
+        velocity_margin: float = 0.02,
+        slack_min: float = 0.1,
+) -> Array:
+    """Initialize the private manifold slack state for one LidarEnv graph."""
+    agent_states = graph.type_states(type_idx=env.AGENT, n_type=env.num_agents)
+    n_agent_constraints, n_obs_constraints, n_constraints = _constraint_counts(env, top_k_obs)
+    if n_constraints == 0:
+        return jnp.zeros((env.num_agents, 0), dtype=agent_states.dtype)
+
+    obs_states_all = None
+    if env.params["n_obs"] > 0:
+        n_hits = env.params["top_k_rays"] * env.num_agents
+        obs_states_all = graph.type_states(type_idx=env.OBS, n_type=n_hits)
+        obs_states_all = obs_states_all.reshape(env.num_agents, env.params["top_k_rays"], env.state_dim)
+
+    slack = []
+    for i_agent in range(env.num_agents):
+        entity_states, _, active, safe_radius = _agent_constraint_data(
+            env, graph, agent_states, obs_states_all, i_agent, top_k_obs,
+            n_agent_constraints, n_obs_constraints, safety_margin
+        )
+        h = _pairwise_collision_h(
+            agent_states[i_agent],
+            entity_states,
+            active,
+            safe_radius,
+            braking_accel,
+            velocity_margin,
+        )
+        slack.append(jnp.maximum(-h, slack_min))
+    return jnp.stack(slack, axis=0)
 
 
 def lidar_manifold_project(
@@ -162,6 +263,50 @@ def lidar_manifold_project(
     nominal reference action and projects it using local pairwise constraints
     against other agents and per-agent lidar hit points.
     """
+    slack_state = lidar_manifold_init_slack(
+        env,
+        graph,
+        top_k_obs=top_k_obs,
+        safety_margin=safety_margin,
+        braking_accel=braking_accel,
+        velocity_margin=velocity_margin,
+        slack_min=slack_min,
+    )
+    action_safe, _ = lidar_manifold_project_with_slack(
+        env,
+        graph,
+        action_ref,
+        slack_state,
+        top_k_obs=top_k_obs,
+        safety_margin=safety_margin,
+        braking_accel=braking_accel,
+        velocity_margin=velocity_margin,
+        contraction_gain=contraction_gain,
+        slack_min=slack_min,
+        slack_beta=slack_beta,
+        slack_weight=slack_weight,
+        reg=reg,
+    )
+    return action_safe
+
+
+def lidar_manifold_project_with_slack(
+        env: LidarEnv,
+        graph: GraphsTuple,
+        action_ref: Action,
+        slack_state: Array,
+        *,
+        top_k_obs: int = 3,
+        safety_margin: float = 0.02,
+        braking_accel: float = 1.0,
+        velocity_margin: float = 0.02,
+        contraction_gain: float = 30.0,
+        slack_min: float = 0.1,
+        slack_beta: float = 1.0,
+        slack_weight: float = 10.0,
+        reg: float = 1e-5,
+) -> Tuple[Action, Array]:
+    """Project actions and roll the private manifold slack state forward."""
     agent_states = graph.type_states(type_idx=env.AGENT, n_type=env.num_agents)
     dynamics = env.agent_control_affine_dynamics(agent_states)
     action_ref = env.clip_action(action_ref)
@@ -169,12 +314,10 @@ def lidar_manifold_project(
     # 每个 agent 约束所有其他 agent，以及自己的 top-k lidar 返回点。
     # lidar 返回点是障碍物边界 hit point，因此这里把非圆形障碍物近似为
     # 局部点障碍集合，而不是精确的矩形 SDF 约束。
-    n_agent_constraints = env.num_agents - 1
-    n_obs_constraints = min(top_k_obs, env.params["top_k_rays"]) if env.params["n_obs"] > 0 else 0
-    n_constraints = n_agent_constraints + n_obs_constraints
+    n_agent_constraints, n_obs_constraints, n_constraints = _constraint_counts(env, top_k_obs)
 
     if n_constraints == 0:
-        return action_ref
+        return action_ref, slack_state
 
     obs_states_all = None
     if env.params["n_obs"] > 0:
@@ -185,41 +328,16 @@ def lidar_manifold_project(
         obs_states_all = graph.type_states(type_idx=env.OBS, n_type=n_hits)
         obs_states_all = obs_states_all.reshape(env.num_agents, env.params["top_k_rays"], env.state_dim)
 
-    safe_agent = 2.0 * env.params["car_radius"] + safety_margin
-    safe_obs = env.params["car_radius"] + safety_margin
     projected_actions = []
+    next_slack = []
 
     for i_agent in range(env.num_agents):
-        other_ids = [idx for idx in range(env.num_agents) if idx != i_agent]
-        entities = []
-        entity_drifts = []
-        active = []
-        safe_radius = []
-        if n_agent_constraints > 0:
-            # agent-agent 约束使用双倍半径，因为两个 agent 都有物理尺寸。
-            other_states = agent_states[jnp.array(other_ids)]
-            entities.append(other_states)
-            entity_drifts.append(_entity_drift(other_states, env.state_dim))
-            active.append(jnp.ones((n_agent_constraints,), dtype=bool))
-            safe_radius.append(jnp.ones((n_agent_constraints,), dtype=agent_states.dtype) * safe_agent)
+        entity_states, drift_entities, active_constraints, safe_radius_constraints = _agent_constraint_data(
+            env, graph, agent_states, obs_states_all, i_agent, top_k_obs,
+            n_agent_constraints, n_obs_constraints, safety_margin
+        )
 
-        if n_obs_constraints > 0:
-            # agent-obstacle 约束把 lidar hit point 当作静态实体；
-            # 超出通信半径的 hit point 标记为 inactive。
-            obs_states = obs_states_all[i_agent, :top_k_obs]
-            obs_dist = jnp.linalg.norm(obs_states[:, :2] - agent_states[i_agent, None, :2], axis=-1)
-            obs_active = obs_dist < env.params["comm_radius"]
-            entities.append(obs_states)
-            entity_drifts.append(jnp.zeros_like(obs_states))
-            active.append(obs_active)
-            safe_radius.append(jnp.ones((n_obs_constraints,), dtype=agent_states.dtype) * safe_obs)
-
-        entity_states = jnp.concatenate(entities, axis=0)
-        drift_entities = jnp.concatenate(entity_drifts, axis=0)
-        active_constraints = jnp.concatenate(active, axis=0)
-        safe_radius_constraints = jnp.concatenate(safe_radius, axis=0)
-
-        action_safe_i = _single_agent_project(
+        action_safe_i, slack_i = _single_agent_project(
             env=env,
             own_state=agent_states[i_agent],
             own_drift=dynamics.drift[i_agent],
@@ -228,6 +346,7 @@ def lidar_manifold_project(
             entity_drift=drift_entities,
             active=active_constraints,
             safe_radius=safe_radius_constraints,
+            mu=slack_state[i_agent],
             u_ref=action_ref[i_agent],
             braking_accel=braking_accel,
             velocity_margin=velocity_margin,
@@ -238,7 +357,10 @@ def lidar_manifold_project(
             reg=reg,
         )
         projected_actions.append(action_safe_i)
+        next_slack.append(slack_i)
 
     action_safe = jnp.stack(projected_actions, axis=0)
+    slack_next = jnp.stack(next_slack, axis=0)
     assert action_safe.shape == action_ref.shape
-    return jnp.nan_to_num(env.clip_action(action_safe), nan=0.0, posinf=1.0, neginf=-1.0)
+    assert slack_next.shape == slack_state.shape
+    return jnp.nan_to_num(env.clip_action(action_safe), nan=0.0, posinf=1.0, neginf=-1.0), slack_next
