@@ -1,4 +1,3 @@
-import functools as ft
 from typing import Tuple
 
 import jax
@@ -73,8 +72,80 @@ def _pairwise_collision_h(
     return jnp.where(active, h, -1.0)
 
 
+def _velocity_state_jac(state: Array) -> Array:
+    if state.shape[0] == 5:
+        speed = state[4]
+        cos_theta = state[2]
+        sin_theta = state[3]
+        jac = jnp.zeros((2, state.shape[0]), dtype=state.dtype)
+        jac = jac.at[0, 2].set(speed)
+        jac = jac.at[1, 3].set(speed)
+        jac = jac.at[:, 4].set(jnp.array([cos_theta, sin_theta], dtype=state.dtype))
+        return jac
+    jac = jnp.zeros((2, state.shape[0]), dtype=state.dtype)
+    return jac.at[:, 2:4].set(jnp.eye(2, dtype=state.dtype))
+
+
+def _pairwise_collision_h_jac(
+        own_state: Array,
+        entity_states: AgentState,
+        active: Array,
+        safe_radius: Array,
+        braking_accel: float,
+        velocity_margin: float,
+) -> Tuple[Array, Array, Array]:
+    # 解析计算 h 及其对 own/entity state 的雅可比，避免在 rollout
+    # 内部反复调用 jacfwd。符号约定与 _pairwise_collision_h 一致：
+    # r = p_own - p_entity, v = v_own - v_entity。
+    own_pos = _agent_position(own_state)
+    own_vel = _agent_velocity(own_state)
+    entity_pos = entity_states[:, :2]
+    if own_state.shape[0] == 5:
+        entity_vel = entity_states[:, 4:5] * entity_states[:, 2:4]
+    else:
+        entity_vel = entity_states[:, 2:4]
+
+    rel_pos = own_pos[None, :] - entity_pos
+    rel_vel = own_vel[None, :] - entity_vel
+    dist = jnp.linalg.norm(rel_pos, axis=-1)
+    safe_dist = jnp.maximum(dist, 1e-6)
+    direction = rel_pos / safe_dist[:, None]
+    closing_raw = -jnp.sum(rel_vel * direction, axis=-1)
+    is_closing = closing_raw > 0.0
+    approach_speed = jnp.where(is_closing, closing_raw, 0.0)
+    braking_margin = velocity_margin + approach_speed ** 2 / (2.0 * braking_accel)
+    radius_with_margin = safe_radius + braking_margin
+    h = radius_with_margin ** 2 - dist ** 2
+
+    eye2 = jnp.eye(2, dtype=own_state.dtype)
+    dir_jac = (eye2[None, :, :] - direction[:, :, None] * direction[:, None, :]) / safe_dist[:, None, None]
+    dclosing_drel_pos = -jnp.einsum("mij,mj->mi", dir_jac, rel_vel)
+    dapproach_scale = jnp.where(is_closing, approach_speed / braking_accel, 0.0)
+    margin_scale = 2.0 * radius_with_margin * dapproach_scale
+
+    dh_drel_pos = margin_scale[:, None] * dclosing_drel_pos - 2.0 * rel_pos
+    dh_down_vel = margin_scale[:, None] * (-direction)
+    dh_dentity_vel = margin_scale[:, None] * direction
+
+    own_vel_jac = _velocity_state_jac(own_state)
+    entity_vel_jac = jax.vmap(_velocity_state_jac)(entity_states)
+    dh_down = jnp.zeros((entity_states.shape[0], own_state.shape[0]), dtype=own_state.dtype)
+    dh_down = dh_down.at[:, :2].set(dh_drel_pos)
+    dh_down = dh_down + dh_down_vel @ own_vel_jac
+
+    dh_dentities = jnp.zeros_like(entity_states)
+    dh_dentities = dh_dentities.at[:, :2].set(-dh_drel_pos)
+    dh_dentities = dh_dentities + jnp.einsum("mi,mij->mj", dh_dentity_vel, entity_vel_jac)
+
+    h = jnp.where(active, h, -1.0)
+    dh_down = jnp.where(active[:, None], dh_down, 0.0)
+    dh_dentities = jnp.where(active[:, None], dh_dentities, 0.0)
+    return h, dh_down, dh_dentities
+
+
 def _single_agent_project(
-        env: LidarEnv,
+        action_dim: int,
+        dt: float,
         own_state: Array,
         own_drift: Array,
         own_control_matrix: Array,
@@ -92,25 +163,20 @@ def _single_agent_project(
         slack_weight: float,
         reg: float,
 ) -> Tuple[Array, Array]:
-    # 固定 h 中的静态参数，让自动微分只对本 agent 状态和邻居状态求导。
-    h_fn = ft.partial(
-        _pairwise_collision_h,
-        active=active,
-        safe_radius=safe_radius,
-        braking_accel=braking_accel,
-        velocity_margin=velocity_margin,
+    h, dh_down, dh_dentities = _pairwise_collision_h_jac(
+        own_state,
+        entity_states,
+        active,
+        safe_radius,
+        braking_accel,
+        velocity_margin,
     )
-    h = h_fn(own_state, entity_states)
+
     # 流形残差 c = h + mu。mu 不放进环境状态，而是由算法 rollout 的
     # scan carry 单独维护，这样可以保持论文里增广状态的时间连续性。
     mu = jnp.where(active, mu, jnp.maximum(-h, slack_min))
     mu = jnp.clip(jnp.nan_to_num(mu, nan=slack_min, posinf=50.0, neginf=slack_min), slack_min, 50.0)
     c = h + mu
-
-    # 线性化约束。dh_down 把当前 agent 的状态速度映射到 h_dot；
-    # dh_dentities 把运动邻居的状态速度映射到漂移项。
-    dh_down = jax.jacfwd(h_fn, argnums=0)(own_state, entity_states)
-    dh_dentities = jax.jacfwd(h_fn, argnums=1)(own_state, entity_states)
 
     # 约束漂移 psi 收集 h_dot 中不受当前 agent action 控制的部分：
     # 当前 agent 的被动动力学，以及邻居实体的运动。
@@ -120,9 +186,6 @@ def _single_agent_project(
 
     # J_h G 是 h_dot = psi + J_h G u 中 action 对约束变化率的雅可比。
     action_jac = dh_down @ own_control_matrix
-    # mu 代表“离约束边界有多远”。距离很远时 mu 会很大，但此时
-    # 约束残差 c 通常接近 0，不需要让 exp(mu) 继续变大；否则远距离
-    # agent-agent 约束会把投影矩阵撑到 inf，随后 pinv 产生 NaN。
     slack_exp_arg = jnp.clip(slack_beta * mu, a_max=20.0)
     slack_actuation = jnp.expm1(slack_exp_arg)
 
@@ -138,17 +201,17 @@ def _single_agent_project(
     # 小 Tikhonov 正则项，避免数值不稳定。
     residual = psi + j_aug @ u_ref_aug + contraction_gain * c
     gram = j_aug @ j_aug.T + reg * jnp.eye(j_aug.shape[0], dtype=j_aug.dtype)
-    correction = j_aug.T @ (jnp.linalg.pinv(gram) @ residual)
+    correction = j_aug.T @ jnp.linalg.solve(gram, residual)
     u_safe_aug = u_ref_aug - correction
     u_safe_aug = jnp.nan_to_num(u_safe_aug, nan=0.0, posinf=1.0, neginf=-1.0)
-    v_mu = u_safe_aug[env.action_dim:]
+    v_mu = u_safe_aug[action_dim:]
     # 虚拟 slack 控制只在 filter 内部积分，不写回环境。
-    mu_next = mu + env.dt * slack_actuation * v_mu
+    mu_next = mu + dt * slack_actuation * v_mu
     mu_next = jnp.clip(jnp.nan_to_num(mu_next, nan=slack_min, posinf=50.0, neginf=slack_min), slack_min, 50.0)
     mu_reset = jnp.maximum(-h, slack_min)
     mu_next = jnp.where(active, mu_next, mu_reset)
     # 只执行真实物理 action；虚拟 slack 控制最后丢弃。
-    return u_safe_aug[:env.action_dim], mu_next
+    return u_safe_aug[:action_dim], mu_next
 
 
 def _constraint_counts(env: LidarEnv, top_k_obs: int) -> Tuple[int, int, int]:
@@ -224,22 +287,30 @@ def lidar_manifold_init_slack(
         obs_states_all = graph.type_states(type_idx=env.OBS, n_type=n_hits)
         obs_states_all = obs_states_all.reshape(env.num_agents, env.params["top_k_rays"], env.state_dim)
 
-    slack = []
+    entity_states = []
+    active_constraints = []
+    safe_radius_constraints = []
     for i_agent in range(env.num_agents):
-        entity_states, _, active, safe_radius = _agent_constraint_data(
+        entity_states_i, _, active_i, safe_radius_i = _agent_constraint_data(
             env, graph, agent_states, obs_states_all, i_agent, top_k_obs,
             n_agent_constraints, n_obs_constraints, safety_margin
         )
-        h = _pairwise_collision_h(
-            agent_states[i_agent],
-            entity_states,
-            active,
-            safe_radius,
-            braking_accel,
-            velocity_margin,
-        )
-        slack.append(jnp.maximum(-h, slack_min))
-    return jnp.stack(slack, axis=0)
+        entity_states.append(entity_states_i)
+        active_constraints.append(active_i)
+        safe_radius_constraints.append(safe_radius_i)
+
+    entity_states = jnp.stack(entity_states, axis=0)
+    active_constraints = jnp.stack(active_constraints, axis=0)
+    safe_radius_constraints = jnp.stack(safe_radius_constraints, axis=0)
+    h = jax.vmap(_pairwise_collision_h, in_axes=(0, 0, 0, 0, None, None))(
+        agent_states,
+        entity_states,
+        active_constraints,
+        safe_radius_constraints,
+        braking_accel,
+        velocity_margin,
+    )
+    return jnp.maximum(-h, slack_min)
 
 
 def lidar_manifold_project(
@@ -328,39 +399,49 @@ def lidar_manifold_project_with_slack(
         obs_states_all = graph.type_states(type_idx=env.OBS, n_type=n_hits)
         obs_states_all = obs_states_all.reshape(env.num_agents, env.params["top_k_rays"], env.state_dim)
 
-    projected_actions = []
-    next_slack = []
+    entity_states = []
+    entity_drifts = []
+    active_constraints = []
+    safe_radius_constraints = []
 
     for i_agent in range(env.num_agents):
-        entity_states, drift_entities, active_constraints, safe_radius_constraints = _agent_constraint_data(
+        entity_states_i, drift_entities_i, active_i, safe_radius_i = _agent_constraint_data(
             env, graph, agent_states, obs_states_all, i_agent, top_k_obs,
             n_agent_constraints, n_obs_constraints, safety_margin
         )
+        entity_states.append(entity_states_i)
+        entity_drifts.append(drift_entities_i)
+        active_constraints.append(active_i)
+        safe_radius_constraints.append(safe_radius_i)
 
-        action_safe_i, slack_i = _single_agent_project(
-            env=env,
-            own_state=agent_states[i_agent],
-            own_drift=dynamics.drift[i_agent],
-            own_control_matrix=dynamics.control_matrix[i_agent],
-            entity_states=entity_states,
-            entity_drift=drift_entities,
-            active=active_constraints,
-            safe_radius=safe_radius_constraints,
-            mu=slack_state[i_agent],
-            u_ref=action_ref[i_agent],
-            braking_accel=braking_accel,
-            velocity_margin=velocity_margin,
-            contraction_gain=contraction_gain,
-            slack_min=slack_min,
-            slack_beta=slack_beta,
-            slack_weight=slack_weight,
-            reg=reg,
-        )
-        projected_actions.append(action_safe_i)
-        next_slack.append(slack_i)
+    entity_states = jnp.stack(entity_states, axis=0)
+    entity_drifts = jnp.stack(entity_drifts, axis=0)
+    active_constraints = jnp.stack(active_constraints, axis=0)
+    safe_radius_constraints = jnp.stack(safe_radius_constraints, axis=0)
 
-    action_safe = jnp.stack(projected_actions, axis=0)
-    slack_next = jnp.stack(next_slack, axis=0)
+    action_safe, slack_next = jax.vmap(
+        _single_agent_project,
+        in_axes=(None, None, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, None, None, None, None),
+    )(
+        env.action_dim,
+        env.dt,
+        agent_states,
+        dynamics.drift,
+        dynamics.control_matrix,
+        entity_states,
+        entity_drifts,
+        active_constraints,
+        safe_radius_constraints,
+        slack_state,
+        action_ref,
+        braking_accel,
+        velocity_margin,
+        contraction_gain,
+        slack_min,
+        slack_beta,
+        slack_weight,
+        reg,
+    )
     assert action_safe.shape == action_ref.shape
     assert slack_next.shape == slack_state.shape
     return jnp.nan_to_num(env.clip_action(action_safe), nan=0.0, posinf=1.0, neginf=-1.0), slack_next
