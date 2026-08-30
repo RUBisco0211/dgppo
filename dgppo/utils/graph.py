@@ -10,6 +10,7 @@ from .utils import merge01
 
 _State = TypeVar("_State")
 _EnvState = TypeVar("_EnvState")
+_UNSET = object()
 
 
 class EdgeBlock(NamedTuple):
@@ -150,28 +151,28 @@ class GraphsTuple(tuple, Generic[_State, _EnvState]):
 
     def _replace(
         self,
-        n_node=None,
-        n_edge=None,
-        nodes=None,
-        edges=None,
-        states: _State = None,
-        receivers=None,
-        senders=None,
-        node_type=None,
-        env_states: _EnvState = None,
-        connectivity=None,
+        n_node=_UNSET,
+        n_edge=_UNSET,
+        nodes=_UNSET,
+        edges=_UNSET,
+        states: _State = _UNSET,
+        receivers=_UNSET,
+        senders=_UNSET,
+        node_type=_UNSET,
+        env_states: _EnvState = _UNSET,
+        connectivity=_UNSET,
     ) -> "GraphsTuple":
         return GraphsTuple(
-            self.n_node if n_node is None else n_node,
-            self.n_edge if n_edge is None else n_edge,
-            self.nodes if nodes is None else nodes,
-            self.edges if edges is None else edges,
-            self.states if states is None else states,
-            self.receivers if receivers is None else receivers,
-            self.senders if senders is None else senders,
-            self.node_type if node_type is None else node_type,
-            self.env_states if env_states is None else env_states,
-            self.connectivity if connectivity is None else connectivity,
+            self.n_node if n_node is _UNSET else n_node,
+            self.n_edge if n_edge is _UNSET else n_edge,
+            self.nodes if nodes is _UNSET else nodes,
+            self.edges if edges is _UNSET else edges,
+            self.states if states is _UNSET else states,
+            self.receivers if receivers is _UNSET else receivers,
+            self.senders if senders is _UNSET else senders,
+            self.node_type if node_type is _UNSET else node_type,
+            self.env_states if env_states is _UNSET else env_states,
+            self.connectivity if connectivity is _UNSET else connectivity,
         )
 
     def without_edge(self):
