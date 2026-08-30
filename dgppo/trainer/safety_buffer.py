@@ -3,6 +3,7 @@
 import pickle
 from pathlib import Path
 
+import jax.numpy as jnp
 import jax.tree_util as jtu
 import numpy as np
 
