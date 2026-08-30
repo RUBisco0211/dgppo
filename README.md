@@ -102,7 +102,7 @@ We provide the following environments with the [LidarEnv](https://github.com/MIT
 - `LidarBicycleTarget`: The agents (following the bicycle dynamics) need to reach their pre-assigned goals.
 
 ### VMAS
-We provide the following environments with the [VMAS](https://github.com/proroklab/VectorizedMultiAgentSimulator) (VectorizedMultiAgentSimulator) simulation engine: `VMASReverseTransport`, `VMASWheel`. In these environments, contact dynamics are modeled. Agents follow the double integrator dynamics and have full observation.
+We provide the following environments with the [VMAS](https://github.com/proroklab/VectorizedMultiAgentSimulator)-style JAX physics engine: `VMASNavigation`, `VMASNavigationObs`, `VMASReverseTransport`, and `VMASWheel`. The navigation scenarios model agent/obstacle collision avoidance; the transport and wheel scenarios additionally include contact dynamics.
 
 <div align="center">
     <img src="./media/vmas/img/VMASReverseTransport.png" width="24.55%" alt="VMASReverseTransport">
@@ -111,6 +111,8 @@ We provide the following environments with the [VMAS](https://github.com/prorokl
 
 - `VMASReverseTransport`: The agents need to push a box from inside to its pre-assigned goals, while the center of the box must avoid the obstacles.
 - `VMASWheel`: The agents need to push a wheel to its pre-assigned angle, while the wheel must avoid a range of dangerous angles.
+- `VMASNavigation`: The agents navigate to assigned goals while avoiding one another.
+- `VMASNavigationObs`: Navigation with static circular obstacles.
 
 ### Custom Environments
 It is very easy to create a custom environment by yourself! Choose one of the three engines, and inherit one of the existing environments. Define your reward function, graph connection, and dynamics, register the new environment in `env/__init__.py`, and you are good to go!
@@ -122,6 +124,7 @@ We provide the following algorithms:
 - `dgppo`: Discrete GCBF Proximal Policy Optimization.
 - `informarl`: [MAPPO](https://github.com/marlbenchmark/on-policy) with GNN ([Scalable Multi-Agent Reinforcement Learning through Intelligent Information Aggregation](https://github.com/nsidn98/InforMARL/)).
 - `informarl_lagr`: [MAPPO-Lagrangian](https://github.com/chauncygu/Multi-Agent-Constrained-Policy-Optimisation) with GNN. Replaced the sum-over-time cost with max-over-time cost.
+- `informarl_hj_crpo`: InforMARL with a separately trained distributed Graph-HJ critic and CRPO-style constrained PPO updates. It does not apply a runtime QP. See [the integration design](research/informarl_hj_crpo_design.md).
 - `hcbfcrpo`: DGPPO but replace the learned GCBF with a hand-crafted CBF.
 
 ## Usage
@@ -132,6 +135,15 @@ To train the `<algo>` algorithm on the `<env>` environment with `<n_agent>` agen
 
 ```bash
 python train.py --env <env> --algo <algo> -n <n_agent> --obs <n_obs>
+```
+
+`informarl_hj_crpo` requires a pretrained Graph-HJ critic for a new PPO run:
+
+```bash
+python train_safety_filter.py --env VMASNavigationObs -n 3 --obs 3 \
+  --output-dir ./logs/deep_qp_safety/vmas_navigation_obs
+python train.py --env VMASNavigationObs --algo informarl_hj_crpo -n 3 --obs 3 --no-rnn \
+  --deep-qp-checkpoint ./logs/deep_qp_safety/vmas_navigation_obs/deep_qp_safety.pkl
 ```
 
 The training logs will be saved in `logs/<env>/<algo>/seed<seed>_<timestamp>_<four random letters>`. We provide the following flags:
