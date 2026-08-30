@@ -30,3 +30,14 @@ class Rollout(NamedTuple):
     @property
     def n_data(self) -> int:
         return self.length * self.time_horizon
+
+
+class SafetyBatch(NamedTuple):
+    """Off-policy transitions used only to pretrain the Graph-HJ critic."""
+
+    graph: GraphsTuple
+    actions: Action
+    constraints: Array
+    next_graph: GraphsTuple
+    next_constraints: Array
+    dones: Done
