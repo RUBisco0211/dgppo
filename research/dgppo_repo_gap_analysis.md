@@ -229,4 +229,3 @@ Trainer 每次保存只保留 `models/latest`：[trainer.py](../dgppo/trainer/tr
 如果偏系统与鲁棒性：
 
 > **Robust DGPPO under Density, Dynamics, and Communication Shift**：把执行、观测、图通信不确定度转成自适应 DGCBF margin，并在拥挤、异构和耦合多机器人系统上验证。
-

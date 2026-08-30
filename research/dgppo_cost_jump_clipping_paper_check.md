@@ -150,4 +150,3 @@ $$
 3. **实验复现层面：** 如果只照附录 C.2 的公式实现而不加代码中的后处理，训练 target 的尺度与官方实验实现不同，不能算严格复现官方代码路径。
 4. **文档表述层面：** 应写成“官方实现额外加入 ±0.5 margin，并在部分环境双边裁剪”，而不是“论文定义了 ±0.5 jump 并统一 clip 到 `[-1,1]`”。
 5. **若在当前 Multi-Agent Deep-QP 中借用：** 应把 raw physical constraint 与 critic training transform 分成两个显式接口，并分别记录 raw/shifted/clipped 指标；不要让一个名为 `cost` 的张量同时承担物理安全边界、学习 target 和报告指标而不注明语义。
-

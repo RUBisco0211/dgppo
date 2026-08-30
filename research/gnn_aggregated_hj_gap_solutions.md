@@ -384,4 +384,3 @@ $$
 - HJB-GNN 作者官方实现：[hublan24/HJB-GNN](https://github.com/hublan24/HJB-GNN)。当前 README 显示公开环境主要为 CrazyFlie，并包含 graph CBF、controller、value 与 replay 相关训练参数。
 - HJB-GNN 作者项目页：[NUS CORE HJB-GNN](https://nus-core.github.io/assets/standalone/HJB-GNN/index.html)。
 - Hsu et al., *Deep QP Safety Filter: Model-free Learning for Reachability-based Safety Filter*, arXiv:2601.21297, 2026：[论文 HTML](https://arxiv.org/html/2601.21297)。关键位置为方向导数重参数化、off-policy target networks、式 (10) 至式 (11) 和固定算子收缩结论。
-

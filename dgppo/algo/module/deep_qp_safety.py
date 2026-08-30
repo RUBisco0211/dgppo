@@ -545,4 +545,3 @@ class GraphHJSafetyCritic:
             "safety/update_applied": update_finite.astype(jnp.float32),
         }
         return DeepQPSafetyTrainState(online=online, target_params=target_params), info
-

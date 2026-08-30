@@ -275,4 +275,3 @@ $$
 - [GCBF+ 官方代码](https://github.com/MIT-REALM/gcbfplus)
 - [Deep-QP Safety Filter 论文](https://arxiv.org/html/2601.21297)
 - [Deep-QP model-free Bellman operators、重参数化与 QP](https://arxiv.org/html/2601.21297#S3.SS4)
-

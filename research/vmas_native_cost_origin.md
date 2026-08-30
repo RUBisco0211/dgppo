@@ -1,6 +1,6 @@
 # VMAS 原生 `cost` 接口与本仓库 Navigation cost 的来源
 
-日期：2026-08-30  
+日期：2026-08-30
 范围：VMAS 官方仓库 `proroklab/VectorizedMultiAgentSimulator`、本仓库 git 历史。本文只做来源核查，不评价当前 cost 变换是否适合具体算法。
 
 ## 结论
@@ -127,4 +127,3 @@ cost = jnp.clip(cost, a_min=-1.0, a_max=1.0)
 - [VMAS 官方 Navigation git 历史](https://github.com/proroklab/VectorizedMultiAgentSimulator/commits/main/vmas/scenarios/navigation.py)
 - [本仓库 Navigation 首次引入提交](https://github.com/RUBisco0211/dgppo/commit/dca1bb9a28f5683e21339d8c58edfb2019c6acb3)
 - [本仓库 Physax 与 cost margin 引入提交](https://github.com/RUBisco0211/dgppo/commit/915a30ba2dce41522331e1489486653f67c9f615)
-
