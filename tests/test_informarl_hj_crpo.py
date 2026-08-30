@@ -37,6 +37,7 @@ class InforMARLHJCRPOTest(unittest.TestCase):
             n_agents=env.num_agents,
             use_rnn=False,
             batch_size=env.max_episode_steps,
+            rnn_step=env.max_episode_steps,
             deep_qp_gnn_out_dim=8,
             deep_qp_hidden_dim=16,
             deep_qp_hidden_layers=1,
@@ -48,6 +49,16 @@ class InforMARLHJCRPOTest(unittest.TestCase):
             rollout.actions.shape,
             (1, env.max_episode_steps, env.num_agents, env.action_dim),
         )
+        info = algo.update(rollout, step=0)
+        for key in (
+            "Vl/loss",
+            "policy/loss",
+            "hj_crpo/constraint_estimate",
+            "hj_crpo/safety_update",
+            "hj_crpo/violation_mean",
+        ):
+            self.assertIn(key, info)
+            self.assertTrue(np.isfinite(np.asarray(info[key])).all())
 
 
 if __name__ == "__main__":
