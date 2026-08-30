@@ -1,6 +1,7 @@
 from .base import Algorithm
 from .informarl import InforMARL
 from .informarl_manifold import InforMARLManifold
+from .informarl_deep_qp import InforMARLHJCRPO
 from .informarl_lagr import InforMARLLagr
 from .dgppo import DGPPO
 from .hcbfcrpo import HCBFCRPO
@@ -11,6 +12,8 @@ def make_algo(algo: str, **kwargs) -> Algorithm:
         return InforMARL(**kwargs)
     elif algo == 'informarl_manifold':
         return InforMARLManifold(**kwargs)
+    elif algo in {'informarl_hj_crpo', 'informarl_deep_qp'}:
+        return InforMARLHJCRPO(**kwargs)
     elif algo == 'informarl_lagr':
         return InforMARLLagr(**kwargs)
     elif algo == 'dgppo':

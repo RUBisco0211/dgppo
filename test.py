@@ -75,11 +75,29 @@ def test(args):
         use_rnn=config.use_rnn,
         rnn_layers=config.rnn_layers,
         use_lstm=config.use_lstm,
+        deep_qp_gnn_layers=getattr(config, "deep_qp_gnn_layers", 1),
+        deep_qp_gnn_out_dim=getattr(config, "deep_qp_gnn_out_dim", 64),
+        deep_qp_hidden_dim=getattr(config, "deep_qp_hidden_dim", 256),
+        deep_qp_hidden_layers=getattr(config, "deep_qp_hidden_layers", 2),
+        deep_qp_lr=getattr(config, "deep_qp_lr", 3e-4),
+        deep_qp_lr_final=getattr(config, "deep_qp_lr_final", 3e-6),
+        deep_qp_tau=getattr(config, "deep_qp_tau", 0.005),
+        deep_qp_lambda_init=getattr(config, "deep_qp_lambda_init", None),
+        deep_qp_lambda_final=getattr(config, "deep_qp_lambda_final", None),
+        deep_qp_lambda_decay_steps=getattr(config, "deep_qp_lambda_decay_steps", 1_000_000),
+        deep_qp_constraint_scale=getattr(config, "deep_qp_constraint_scale", 0.5),
+        deep_qp_agent_margin=getattr(config, "deep_qp_agent_margin", 0.02),
+        deep_qp_obstacle_margin=getattr(config, "deep_qp_obstacle_margin", 0.02),
+        deep_qp_braking_accel=getattr(config, "deep_qp_braking_accel", None),
+        hj_cbf_alpha=getattr(config, "hj_cbf_alpha", 1.0),
+        hj_cbf_margin=getattr(config, "hj_cbf_margin", 0.0),
+        hj_cbf_eps=getattr(config, "hj_cbf_eps", 0.0),
+        crpo_threshold=getattr(config, "crpo_threshold", 0.0),
     )
     algo.load(model_path, step)
     if args.stochastic:
-        def act_fn(x, z, rnn_state, key):
-            action, _, new_rnn_state = algo.step(x, z, rnn_state, key)
+        def act_fn(graph, rnn_state, key):
+            action, _, new_rnn_state = algo.step(graph, rnn_state, key)
             return action, new_rnn_state
         act_fn = jax.jit(act_fn)
     else:

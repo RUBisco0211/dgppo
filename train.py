@@ -87,6 +87,15 @@ def train(args):
         args.batch_size = adjusted_batch_size
 
     # create algorithm
+    if (
+        args.algo in {"informarl_hj_crpo", "informarl_deep_qp"}
+        and args.deep_qp_checkpoint is None
+        and args.resume_dir is None
+    ):
+        raise ValueError(
+            "informarl_hj_crpo requires --deep-qp-checkpoint for a new PPO run. "
+            "Pretrain it with train_safety_filter.py."
+        )
     algo = make_algo(
         algo=args.algo,
         env=env,
@@ -129,6 +138,23 @@ def train(args):
         manifold_slack_beta=args.manifold_slack_beta,
         manifold_slack_weight=args.manifold_slack_weight,
         manifold_reg=args.manifold_reg,
+        deep_qp_checkpoint=args.deep_qp_checkpoint,
+        deep_qp_gnn_layers=args.deep_qp_gnn_layers,
+        deep_qp_gnn_out_dim=args.deep_qp_gnn_out_dim,
+        deep_qp_hidden_dim=args.deep_qp_hidden_dim,
+        deep_qp_hidden_layers=args.deep_qp_hidden_layers,
+        deep_qp_lr=args.deep_qp_lr,
+        deep_qp_lr_final=args.deep_qp_lr_final,
+        deep_qp_tau=args.deep_qp_tau,
+        deep_qp_lambda_decay_steps=args.deep_qp_lambda_decay_steps,
+        deep_qp_constraint_scale=args.deep_qp_constraint_scale,
+        deep_qp_agent_margin=args.deep_qp_agent_margin,
+        deep_qp_obstacle_margin=args.deep_qp_obstacle_margin,
+        deep_qp_braking_accel=args.deep_qp_braking_accel,
+        hj_cbf_alpha=args.hj_cbf_alpha,
+        hj_cbf_margin=args.hj_cbf_margin,
+        hj_cbf_eps=args.hj_cbf_eps,
+        crpo_threshold=args.crpo_threshold,
     )
 
     start_step = 0
@@ -242,6 +268,25 @@ def main():
     parser.add_argument("--manifold-slack-beta", type=float, default=1.0)
     parser.add_argument("--manifold-slack-weight", type=float, default=10.0)
     parser.add_argument("--manifold-reg", type=float, default=1e-5)
+
+    # pretrained Graph-HJ critic and CRPO arguments
+    parser.add_argument("--deep-qp-checkpoint", type=str, default=None)
+    parser.add_argument("--deep-qp-gnn-layers", type=int, default=1)
+    parser.add_argument("--deep-qp-gnn-out-dim", type=int, default=64)
+    parser.add_argument("--deep-qp-hidden-dim", type=int, default=256)
+    parser.add_argument("--deep-qp-hidden-layers", type=int, default=2)
+    parser.add_argument("--deep-qp-lr", type=float, default=3e-4)
+    parser.add_argument("--deep-qp-lr-final", type=float, default=3e-6)
+    parser.add_argument("--deep-qp-tau", type=float, default=0.005)
+    parser.add_argument("--deep-qp-lambda-decay-steps", type=int, default=1_000_000)
+    parser.add_argument("--deep-qp-constraint-scale", type=float, default=0.5)
+    parser.add_argument("--deep-qp-agent-margin", type=float, default=0.02)
+    parser.add_argument("--deep-qp-obstacle-margin", type=float, default=0.02)
+    parser.add_argument("--deep-qp-braking-accel", type=float, default=None)
+    parser.add_argument("--hj-cbf-alpha", type=float, default=1.0)
+    parser.add_argument("--hj-cbf-margin", type=float, default=0.0)
+    parser.add_argument("--hj-cbf-eps", type=float, default=0.0)
+    parser.add_argument("--crpo-threshold", type=float, default=0.0)
 
     # NN arguments
     parser.add_argument("--actor-gnn-layers", type=int, default=2)
