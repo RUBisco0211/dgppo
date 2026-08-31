@@ -1,5 +1,7 @@
+import json
 import os
 import pathlib
+import pickle
 import shutil
 
 import wandb
@@ -73,21 +75,26 @@ def _rollout_metrics(rollout: Rollout, prefix: str, cost_components):
 
 
 def _training_metrics(update_info: dict):
-    return {
-        "train/agents/loss_objective": update_info.get("policy/loss", np.nan),
-        "train/agents/loss_critic": update_info.get("Vl/loss", np.nan),
-        "train/agents/loss_critic_l": update_info.get("Vl/loss", np.nan),
-        "train/agents/loss_critic_h": update_info.get("Vh/loss_Vh", update_info.get("Vh/loss", np.nan)),
-        "train/agents/entropy": update_info.get("policy/entropy", np.nan),
-        "train/agents/clip_fraction": update_info.get("policy/clip_frac", np.nan),
-        "train/agents/grad_norm": update_info.get("policy/grad_norm", np.nan),
-        "train/agents/actor_grad_norm": update_info.get("policy/grad_norm", np.nan),
-        "train/agents/critic_l_grad_norm": update_info.get("Vl/grad_norm", np.nan),
-        "train/agents/critic_h_grad_norm": update_info.get(
-            "Vh/grad_Vh_norm", update_info.get("Vh/grad_norm", np.nan)
-        ),
-        "train/agents/safe_ratio": update_info.get("eval/safe_data", np.nan),
+    aliases = {
+        "train/agents/loss_objective": ("policy/loss",),
+        "train/agents/loss_critic": ("Vl/loss",),
+        "train/agents/loss_critic_l": ("Vl/loss",),
+        "train/agents/loss_critic_h": ("Vh/loss_Vh", "Vh/loss"),
+        "train/agents/entropy": ("policy/entropy",),
+        "train/agents/clip_fraction": ("policy/clip_frac",),
+        "train/agents/grad_norm": ("policy/grad_norm",),
+        "train/agents/actor_grad_norm": ("policy/grad_norm",),
+        "train/agents/critic_l_grad_norm": ("Vl/grad_norm",),
+        "train/agents/critic_h_grad_norm": ("Vh/grad_Vh_norm", "Vh/grad_norm"),
+        "train/agents/safe_ratio": ("hj_crpo/safe_data", "eval/safe_data"),
     }
+    metrics = {}
+    for output_key, candidates in aliases.items():
+        for candidate in candidates:
+            if candidate in update_info:
+                metrics[output_key] = update_info[candidate]
+                break
+    return metrics
 
 
 def _wandb_scalars(metrics: dict):
@@ -135,10 +142,23 @@ class Trainer:
             if not os.path.exists(self.model_dir):
                 os.mkdir(self.model_dir)
 
-        wandb.login()
-        wandb.init(name=params['run_name'], project='dgppo', group=env.__class__.__name__, dir=self.log_dir)
+        self.wandb_mode = params.get('wandb_mode', 'online')
+        if self.wandb_mode == 'online':
+            wandb.login()
+        self.wandb_run = wandb.init(
+            id=params.get('wandb_run_id'),
+            resume=(
+                'allow' if params.get('wandb_run_id') is not None else None
+            ),
+            name=params['run_name'],
+            project=params.get('wandb_project', 'dgppo'),
+            group=env.__class__.__name__,
+            dir=self.log_dir if save_log else None,
+            mode=self.wandb_mode,
+        )
         wandb.define_metric("counters/total_frames")
         wandb.define_metric("counters/iter", step_metric="counters/total_frames")
+        wandb.define_metric("counters/update", step_metric="counters/total_frames")
         wandb.define_metric("*", step_metric="counters/total_frames")
 
         self.save_log = save_log
@@ -153,8 +173,31 @@ class Trainer:
         self.start_step = params.get('start_step', 0)
         self.best_eval_reward = -np.inf
 
-        self.update_steps = 0
+        self.update_steps = self.start_step
         self.key = jax.random.PRNGKey(seed)
+        resume_training_state = params.get('resume_training_state')
+        if resume_training_state is not None:
+            if resume_training_state.get("format_version") != 1:
+                raise ValueError("unsupported Trainer checkpoint format")
+            self.key = jnp.asarray(resume_training_state["trainer_key"])
+            self.update_steps = int(
+                resume_training_state.get("update_steps", self.start_step)
+            )
+            self.best_eval_reward = float(
+                resume_training_state.get("best_eval_reward", -np.inf)
+            )
+            np.random.set_state(resume_training_state["numpy_random_state"])
+        self.local_log = None
+        if save_log:
+            metrics_log_file = params.get('metrics_log_file') or os.path.join(
+                self.log_dir, 'training_metrics.jsonl'
+            )
+            pathlib.Path(metrics_log_file).parent.mkdir(parents=True, exist_ok=True)
+            self.local_log = open(
+                metrics_log_file,
+                'a',
+                encoding='utf-8',
+            )
 
     @staticmethod
     def _check_params(params: dict) -> bool:
@@ -182,6 +225,15 @@ class Trainer:
             else:
                 os.remove(path)
         self.algo.save(self.model_dir, 'latest')
+        training_state = {
+            "format_version": 1,
+            "trainer_key": np.asarray(self.key),
+            "update_steps": self.update_steps,
+            "best_eval_reward": self.best_eval_reward,
+            "numpy_random_state": np.random.get_state(),
+        }
+        with open(os.path.join(latest_dir, 'trainer_state.pkl'), 'wb') as file:
+            pickle.dump(training_state, file)
         pathlib.Path(latest_dir, f"latest_iter_{int(step):09d}.txt").touch()
 
     def _eval_video(self, rollouts: Rollout, step: int):
@@ -194,8 +246,14 @@ class Trainer:
         single_rollout = tree_index(rollouts, 0)
         costs = np.asarray(single_rollout.costs)
         Ta_is_unsafe = costs.max(axis=-1) >= 1e-6 if costs.ndim >= 2 else None
-        self.env_test.render_video(single_rollout, video_path, Ta_is_unsafe, {}, dpi=self.video_dpi)
-        return {"eval/video": wandb.Video(str(video_path), format=video_format)}
+        try:
+            self.env_test.render_video(
+                single_rollout, video_path, Ta_is_unsafe, {}, dpi=self.video_dpi
+            )
+            return {"eval/video": wandb.Video(str(video_path), format=video_format)}
+        except (OSError, RuntimeError, ValueError) as error:
+            tqdm.write(f"> Eval video disabled for this iteration: {error}")
+            return {}
 
     def train(self):
         # record start time
@@ -226,58 +284,100 @@ class Trainer:
         test_keys = jr.split(test_key, 1_000)[:self.eval_epi]
 
         pbar = tqdm(total=self.steps, initial=self.start_step, ncols=80)
-        for step in range(self.start_step, self.steps + 1):
-            total_frames = step * self.n_env_train * self.env.max_episode_steps
-            log_info = {
-                "general/iteration": step,
-                "counters/iter": step,
-                "counters/total_frames": total_frames,
-            }
-            media_info = {}
-
-            # evaluate the algorithm
-            if step % self.eval_interval == 0:
-                eval_info = {}
-                test_rollouts: Rollout = test_fn(self.algo.params, test_keys)
-                total_reward = test_rollouts.rewards.sum(axis=-1)
-                reward_min, reward_max = total_reward.min(), total_reward.max()
-                reward_mean = np.mean(total_reward)
-                reward_final = np.mean(test_rollouts.rewards[:, -1])
-                cost = jnp.maximum(test_rollouts.costs, 0.0).max(axis=-1).max(axis=-1).sum(axis=-1).mean()
-                unsafe_frac = np.mean(test_rollouts.costs.max(axis=-1).max(axis=-2) >= 1e-6)
-                eval_info = eval_info | {
-                    "eval/reward": reward_mean,
-                    "eval/reward_final": reward_final,
-                    "eval/cost": cost,
-                    "eval/unsafe_frac": unsafe_frac,
+        final_step = self.start_step
+        try:
+            for step in range(self.start_step, self.steps + 1):
+                final_step = step
+                current_frames = self.n_env_train * self.env.max_episode_steps
+                total_frames = step * current_frames
+                log_info = {
+                    "general/iteration": step,
+                    "counters/iter": step,
+                    "counters/update": self.update_steps,
+                    "counters/stage": 2,
+                    "counters/current_frames": current_frames,
+                    "counters/total_frames": total_frames,
                 }
-                eval_info |= _rollout_metrics(test_rollouts, "eval", self.env_test.cost_components)
-                self.best_eval_reward = max(self.best_eval_reward, eval_info["eval/reward/episode_reward_mean"])
-                eval_info["eval/reward/best_episode_reward_mean"] = self.best_eval_reward
-                time_since_start = time() - start_time
-                eval_verbose = (f'step: {step:3}, time: {time_since_start:5.0f}s, reward: {reward_mean:9.4f}, '
-                                f'min/max reward: {reward_min:7.2f}/{reward_max:7.2f}, cost: {cost:8.4f}, '
-                                f'unsafe_frac: {unsafe_frac:6.2f}')
-                tqdm.write(eval_verbose)
-                log_info |= eval_info
-                media_info |= self._eval_video(test_rollouts, step)
+                media_info = {}
+                iteration_start = time()
 
-            # save the model
-            if self.save_log and step % self.save_interval == 0:
-                self._save_latest_checkpoint(step)
+                # evaluate the algorithm
+                if step % self.eval_interval == 0:
+                    eval_start = time()
+                    eval_info = {}
+                    test_rollouts: Rollout = test_fn(self.algo.params, test_keys)
+                    total_reward = test_rollouts.rewards.sum(axis=-1)
+                    reward_min, reward_max = total_reward.min(), total_reward.max()
+                    reward_mean = np.mean(total_reward)
+                    reward_final = np.mean(test_rollouts.rewards[:, -1])
+                    cost = jnp.maximum(test_rollouts.costs, 0.0).max(axis=-1).max(axis=-1).sum(axis=-1).mean()
+                    unsafe_frac = np.mean(test_rollouts.costs.max(axis=-1).max(axis=-2) >= 1e-6)
+                    eval_info = eval_info | {
+                        "eval/reward": reward_mean,
+                        "eval/reward_final": reward_final,
+                        "eval/cost": cost,
+                        "eval/unsafe_frac": unsafe_frac,
+                    }
+                    eval_info |= _rollout_metrics(test_rollouts, "eval", self.env_test.cost_components)
+                    self.best_eval_reward = max(
+                        self.best_eval_reward,
+                        eval_info["eval/reward/episode_reward_mean"],
+                    )
+                    eval_info["eval/reward/best_episode_reward_mean"] = self.best_eval_reward
+                    time_since_start = time() - start_time
+                    eval_verbose = (
+                        f'step: {step:3}, time: {time_since_start:5.0f}s, '
+                        f'reward: {reward_mean:9.4f}, min/max reward: '
+                        f'{reward_min:7.2f}/{reward_max:7.2f}, cost: {cost:8.4f}, '
+                        f'unsafe_frac: {unsafe_frac:6.2f}'
+                    )
+                    tqdm.write(eval_verbose)
+                    log_info |= eval_info
+                    media_info |= self._eval_video(test_rollouts, step)
+                    log_info["time/evaluation_sec"] = time() - eval_start
 
-            # collect rollouts
-            key_x0, self.key = jax.random.split(self.key)
-            key_x0 = jax.random.split(key_x0, self.n_env_train)
-            rollouts = self.algo.collect(self.algo.params, key_x0)
-            collection_info = _rollout_metrics(rollouts, "collection", self.env.cost_components)
-            log_info |= collection_info
+                # save the model
+                if self.save_log and step % self.save_interval == 0:
+                    checkpoint_start = time()
+                    self._save_latest_checkpoint(step)
+                    log_info["time/checkpoint_sec"] = time() - checkpoint_start
 
-            # update the algorithm
-            update_info = self.algo.update(rollouts, step)
-            log_info |= update_info | _training_metrics(update_info)
-            wandb.log(_wandb_scalars(log_info) | media_info, step=self.update_steps)
-            self.update_steps += 1
+                # collect rollouts
+                collection_start = time()
+                key_x0, self.key = jax.random.split(self.key)
+                key_x0 = jax.random.split(key_x0, self.n_env_train)
+                rollouts = self.algo.collect(self.algo.params, key_x0)
+                collection_info = _rollout_metrics(
+                    rollouts, "collection", self.env.cost_components
+                )
+                log_info |= collection_info
+                log_info["time/collection_sec"] = time() - collection_start
 
-            if step < self.steps:
-                pbar.update(1)
+                # update the algorithm
+                training_start = time()
+                update_info = self.algo.update(rollouts, step)
+                log_info |= update_info | _training_metrics(update_info)
+                log_info["time/training_sec"] = time() - training_start
+                log_info["time/iteration_sec"] = time() - iteration_start
+                scalar_info = _wandb_scalars(log_info)
+                if self.local_log is not None:
+                    self.local_log.write(json.dumps(scalar_info, sort_keys=True) + '\n')
+                    self.local_log.flush()
+                wandb.log(scalar_info | media_info)
+                self.update_steps += 1
+
+                pbar.set_postfix(
+                    reward=collection_info["collection/reward/episode_reward_mean"],
+                    unsafe=collection_info["collection/safety/unsafe_rate"],
+                    loss=_scalar(update_info.get("policy/loss", np.nan)),
+                )
+                if step < self.steps:
+                    pbar.update(1)
+
+            if self.save_log:
+                self._save_latest_checkpoint(final_step + 1)
+        finally:
+            pbar.close()
+            if self.local_log is not None:
+                self.local_log.close()
+            wandb.finish()

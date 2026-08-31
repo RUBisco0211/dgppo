@@ -25,6 +25,7 @@ from ..env.safety_constraint import (
     safety_constraint_metadata,
     safety_node_feature_mask,
 )
+from ..env.lidar_env.base import LidarEnv
 from ..env.vmas.vmas_navigation import VMASNavigation
 from ..trainer.data import Rollout
 from ..utils.graph import GraphsTuple
@@ -85,10 +86,10 @@ class InforMARLHJCRPO(InforMARL):
             **kwargs,
     ):
         super().__init__(*args, train_steps=train_steps, **kwargs)
-        if not isinstance(self._env, VMASNavigation):
+        if not isinstance(self._env, (LidarEnv, VMASNavigation)):
             raise ValueError(
-                "InforMARLHJCRPO currently targets VMASNavigation and "
-                "VMASNavigationObs scenarios."
+                "InforMARLHJCRPO currently targets LidarEnv and the "
+                "VMASNavigation family."
             )
         if hj_cbf_alpha < 0.0:
             raise ValueError("hj_cbf_alpha must be non-negative")

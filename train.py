@@ -1,6 +1,7 @@
 import argparse
 import datetime
 import os
+import pickle
 
 # These must be set before importing modules that may import JAX/XLA.
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
@@ -51,12 +52,13 @@ def train(args):
     print(f"> Running train.py {args}")
 
     # set up environment variables and seed
-    if not is_connected():
-        os.environ["WANDB_MODE"] = "offline"
+    if args.wandb_mode == "auto":
+        args.wandb_mode = "online" if is_connected() else "offline"
     np.random.seed(args.seed)
     if args.debug:
-        os.environ["WANDB_MODE"] = "disabled"
+        args.wandb_mode = "disabled"
         os.environ["JAX_DISABLE_JIT"] = "True"
+    os.environ["WANDB_MODE"] = args.wandb_mode
 
     # create environments
     env = make_env(
@@ -157,6 +159,7 @@ def train(args):
     )
 
     start_step = 0
+    resume_training_state = None
     if args.resume_dir is not None:
         load_dir, load_step = _resolve_resume_checkpoint(args.resume_dir, args.resume_step)
         print(f"> Resuming weights from {os.path.join(load_dir, str(load_step))}")
@@ -169,6 +172,18 @@ def train(args):
         else:
             print("> No checkpoint iteration file found; resuming from iteration 0.")
         algo.load(load_dir, load_step)
+        checkpoint_dir = os.path.join(load_dir, str(load_step))
+        trainer_state_path = os.path.join(checkpoint_dir, "trainer_state.pkl")
+        algo_state_path = os.path.join(checkpoint_dir, "algo_training_state.pkl")
+        if os.path.exists(trainer_state_path) and os.path.exists(algo_state_path):
+            with open(trainer_state_path, "rb") as file:
+                resume_training_state = pickle.load(file)
+            print("> Restored optimizer and training RNG state for full-state continuation.")
+        else:
+            print(
+                "> Legacy checkpoint has no complete training state; "
+                "continuing as a parameter warm-start."
+            )
 
     # Generate a 4 letter random identifier for the run.
     rng_ = np.random.default_rng()
@@ -188,6 +203,8 @@ def train(args):
     run_name = "{}_seed{:03}_{}_{}".format(args.algo, args.seed, start_time, rand_id)
     if args.name is not None:
         run_name = "{}_{}_seed{:03}_{}_{}".format(run_name, args.name, args.seed, start_time, rand_id)
+    if args.wandb_name is not None:
+        run_name = args.wandb_name
 
     # get training parameters
     train_params = {
@@ -200,6 +217,11 @@ def train(args):
         "log_video": not args.no_video and not args.debug,
         "video_dpi": args.video_dpi,
         "start_step": start_step,
+        "wandb_mode": args.wandb_mode,
+        "wandb_project": args.wandb_project,
+        "wandb_run_id": args.wandb_run_id,
+        "metrics_log_file": args.metrics_log_file,
+        "resume_training_state": resume_training_state,
     }
 
     # create trainer
@@ -217,7 +239,7 @@ def train(args):
     )
 
     # save config
-    wandb.config.update(args)
+    wandb.config.update(args, allow_val_change=True)
     wandb.config.update(algo.config, allow_val_change=True)
     if not args.debug:
         with open(f"{log_dir}/config.yaml", "w") as f:
@@ -308,6 +330,15 @@ def main():
     parser.add_argument("--save-interval", type=int, default=1000)
     parser.add_argument("--no-video", action="store_true", default=False)
     parser.add_argument("--video-dpi", type=int, default=100)
+    parser.add_argument(
+        "--wandb-mode",
+        choices=("auto", "online", "offline", "disabled"),
+        default="auto",
+    )
+    parser.add_argument("--wandb-project", type=str, default="dgppo")
+    parser.add_argument("--wandb-name", type=str, default=None)
+    parser.add_argument("--wandb-run-id", type=str, default=None)
+    parser.add_argument("--metrics-log-file", type=str, default=None)
 
     args = parser.parse_args()
     train(args)

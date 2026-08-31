@@ -12,6 +12,7 @@ from dgppo.env.safety_constraint import (
     safety_node_feature_mask,
     vmas_navigation_safety_constraint,
 )
+from dgppo.env.lidar_env.lidar_target import LidarTarget
 from dgppo.env.vmas.vmas_navigation import VMASNavigation, VMASNavigationState
 from dgppo.env.vmas.vmas_navigation_obs import (
     VMASNavigationObs,
@@ -32,6 +33,16 @@ def _env_and_graph():
 
 
 class SafetyConstraintTest(unittest.TestCase):
+    def test_lidar_constraint_uses_only_graph_observation(self):
+        params = LidarTarget.PARAMS.copy()
+        params["n_obs"] = 1
+        params["n_rays"] = 8
+        env = LidarTarget(num_agents=2, max_step=4, params=params)
+        graph = env.reset(jr.PRNGKey(4))._replace(env_states=None)
+        constraint = safety_constraint(env, graph, braking_accel=None)
+        self.assertEqual(constraint.shape, (env.num_agents,))
+        self.assertTrue(np.isfinite(np.asarray(constraint)).all())
+
     def test_continuous_agent_clearance(self):
         env, graph = _env_and_graph()
         constraint = vmas_navigation_safety_constraint(

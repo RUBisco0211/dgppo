@@ -460,13 +460,42 @@ class InforMARL(Algorithm):
         model_dir = os.path.join(save_dir, str(step))
         if not os.path.exists(model_dir):
             os.makedirs(model_dir)
-        pickle.dump(self.policy_train_state.params, open(os.path.join(model_dir, 'actor.pkl'), 'wb'))
-        pickle.dump(self.Vl_train_state.params, open(os.path.join(model_dir, 'Vl.pkl'), 'wb'))
+        with open(os.path.join(model_dir, 'actor.pkl'), 'wb') as file:
+            pickle.dump(self.policy_train_state.params, file)
+        with open(os.path.join(model_dir, 'Vl.pkl'), 'wb') as file:
+            pickle.dump(self.Vl_train_state.params, file)
+        training_state = {
+            "format_version": 1,
+            "policy_step": self.policy_train_state.step,
+            "policy_opt_state": self.policy_train_state.opt_state,
+            "Vl_step": self.Vl_train_state.step,
+            "Vl_opt_state": self.Vl_train_state.opt_state,
+            "algo_key": np.asarray(self.key),
+        }
+        with open(os.path.join(model_dir, 'algo_training_state.pkl'), 'wb') as file:
+            pickle.dump(training_state, file)
 
     def load(self, load_dir: str, step: int):
         path = os.path.join(load_dir, str(step))
+        with open(os.path.join(path, 'actor.pkl'), 'rb') as file:
+            actor_params = pickle.load(file)
+        with open(os.path.join(path, 'Vl.pkl'), 'rb') as file:
+            Vl_params = pickle.load(file)
+        self.policy_train_state = self.policy_train_state.replace(params=actor_params)
+        self.Vl_train_state = self.Vl_train_state.replace(params=Vl_params)
 
-        self.policy_train_state = \
-            self.policy_train_state.replace(params=pickle.load(open(os.path.join(path, 'actor.pkl'), 'rb')))
-        self.Vl_train_state = \
-            self.Vl_train_state.replace(params=pickle.load(open(os.path.join(path, 'Vl.pkl'), 'rb')))
+        training_state_path = os.path.join(path, 'algo_training_state.pkl')
+        if os.path.exists(training_state_path):
+            with open(training_state_path, 'rb') as file:
+                training_state = pickle.load(file)
+            if training_state.get("format_version") != 1:
+                raise ValueError("unsupported InforMARL training checkpoint format")
+            self.policy_train_state = self.policy_train_state.replace(
+                step=training_state["policy_step"],
+                opt_state=training_state["policy_opt_state"],
+            )
+            self.Vl_train_state = self.Vl_train_state.replace(
+                step=training_state["Vl_step"],
+                opt_state=training_state["Vl_opt_state"],
+            )
+            self.key = jnp.asarray(training_state["algo_key"])

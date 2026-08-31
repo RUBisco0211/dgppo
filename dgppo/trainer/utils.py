@@ -137,16 +137,14 @@ def internet(host="8.8.8.8", port=53, timeout=3):
     Service: domain (DNS/TCP)
     """
     try:
-        socket.setdefaulttimeout(timeout)
-        socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect((host, port))
+        with socket.create_connection((host, port), timeout=timeout):
+            pass
         return True
-    except socket.error as ex:
-        print(ex)
+    except OSError:
         return False
 
 
 def is_connected():
-    return True
     return internet()
 
 
