@@ -146,8 +146,9 @@ python train.py --env LidarTarget --algo informarl_hj_crpo -n 3 --obs 3 --no-rnn
   --deep-qp-checkpoint ./logs/deep_qp_safety/lidar_target/deep_qp_safety.pkl
 ```
 
-For a configurable server-ready command that runs both stages with aligned
-network and safety-constraint settings, see the
+The method-specific parameters are written explicitly in
+[`train_hj_informarl.sh`](train_hj_informarl.sh), following the style of
+`train.sh` without changing the original Python CLI defaults. For details, see the
 [two-stage training guide](research/two_stage_training_guide.md).
 
 The training logs will be saved in `logs/<env>/<algo>/seed<seed>_<timestamp>_<four random letters>`. We provide the following flags:

@@ -148,6 +148,16 @@ def train(args):
         deep_qp_lr=args.deep_qp_lr,
         deep_qp_lr_final=args.deep_qp_lr_final,
         deep_qp_tau=args.deep_qp_tau,
+        deep_qp_lambda_init=(
+            None
+            if args.deep_qp_lambda_init is None
+            else args.deep_qp_lambda_init / env.dt
+        ),
+        deep_qp_lambda_final=(
+            None
+            if args.deep_qp_lambda_final is None
+            else args.deep_qp_lambda_final / env.dt
+        ),
         deep_qp_lambda_decay_steps=args.deep_qp_lambda_decay_steps,
         deep_qp_constraint_scale=args.deep_qp_constraint_scale,
         deep_qp_agent_margin=args.deep_qp_agent_margin,
@@ -299,6 +309,8 @@ def main():
     parser.add_argument("--deep-qp-lr", type=float, default=3e-4)
     parser.add_argument("--deep-qp-lr-final", type=float, default=3e-6)
     parser.add_argument("--deep-qp-tau", type=float, default=0.005)
+    parser.add_argument("--deep-qp-lambda-init", type=float, default=None)
+    parser.add_argument("--deep-qp-lambda-final", type=float, default=None)
     parser.add_argument("--deep-qp-lambda-decay-steps", type=int, default=1_000_000)
     parser.add_argument("--deep-qp-constraint-scale", type=float, default=0.5)
     parser.add_argument("--deep-qp-agent-margin", type=float, default=0.02)

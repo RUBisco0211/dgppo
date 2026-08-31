@@ -415,7 +415,7 @@ def train(args):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--env", default="LidarTarget")
+    parser.add_argument("--env", default="VMASNavigationObs")
     parser.add_argument("-n", "--num-agents", type=int, default=3)
     parser.add_argument("--obs", type=int, default=3)
     parser.add_argument("--n-rays", type=int, default=32)

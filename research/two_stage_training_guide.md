@@ -20,118 +20,82 @@ $$
 
 ## 2. 一条命令运行两个阶段
 
-脚本位置：
+训练入口与原仓库的 `train.sh` 放在同一级：
 
 ```text
-scripts/train_hj_informarl_two_stage.sh
+train_hj_informarl.sh
 ```
 
-默认配置为 LidarEnv 系列的 `LidarTarget` 场景、3 个 agent、3 个 obstacle、seed 0，并使用 W&B offline 模式。也可以通过 `ENV_ID` 切换到 `LidarSpread`、`LidarLine`、`LidarBicycleTarget` 或 VMAS navigation 场景：
+默认配置为 LidarEnv 系列的 `LidarTarget` 场景、3 个 agent、3 个 obstacle、seed 0，并使用 W&B offline 模式：
 
 ```bash
-./scripts/train_hj_informarl_two_stage.sh
+./train_hj_informarl.sh
 ```
 
-服务器已配置 W&B API key 时：
+本方法的实验参数全部显式写在该文件顶部，分为以下几组：
+
+- shared environment/logging；
+- Stage 1 Graph-HJ replay、优化器和网络参数；
+- 两阶段共用的 HJ 结构与连续约束参数；
+- Stage 2 InforMARL/PPO 与 HJ-CBF 参数。
+
+服务器开跑前直接编辑文件，例如把：
 
 ```bash
-WANDB_MODE=online ./scripts/train_hj_informarl_two_stage.sh
+python_bin="/path/to/conda/env/bin/python"
+wandb_mode="online"
+env_id="LidarTarget"
+seed=0
 ```
 
-指定 Python 或 Conda 环境：
-
-```bash
-PYTHON_BIN=/path/to/conda/env/bin/python \
-WANDB_MODE=online \
-./scripts/train_hj_informarl_two_stage.sh
-```
+这样不会为了某一次实验而修改 `train.py` 或 `train_safety_filter.py` 原有 CLI 默认参数。
 
 ## 3. 分阶段运行
 
 只训练 HJ critic：
 
 ```bash
-STAGE=hj ./scripts/train_hj_informarl_two_stage.sh
+./train_hj_informarl.sh hj
 ```
 
 HJ checkpoint 已存在时只训练 RL：
 
 ```bash
-STAGE=rl \
-HJ_CHECKPOINT=/path/to/deep_qp_safety.pkl \
-./scripts/train_hj_informarl_two_stage.sh
+./train_hj_informarl.sh rl
 ```
 
-若两个阶段分两次提交到服务器，需保持同一个 `RUN_ROOT`；如果 HJ checkpoint 来自其他目录，则同时传入第一次生成的 `WANDB_RUN_ID`，才能继续写入同一条 W&B run。
+两个阶段分别提交时不要修改 `run_root`，第二阶段会读取 `${run_root}/deep-qp/deep_qp_safety.pkl`，并复用根目录保存的 W&B run ID。
 
-## 4. 常用服务器配置
+## 4. 参数组织原则
 
-```bash
-ENV_ID=LidarTarget \
-NUM_AGENTS=3 \
-NUM_OBS=3 \
-N_RAYS=32 \
-SEED=0 \
-RUN_ROOT=/data/experiments/hj_informarl_seed0 \
-HJ_STEPS=1000000 \
-HJ_N_ENV=64 \
-HJ_BATCH_SIZE=512 \
-RL_STEPS=200000 \
-RL_N_ENV_TRAIN=128 \
-RL_BATCH_SIZE=16384 \
-RL_EVAL_INTERVAL=1000 \
-RL_SAVE_INTERVAL=1000 \
-WANDB_MODE=online \
-WANDB_PROJECT=dgppo \
-./scripts/train_hj_informarl_two_stage.sh
-```
+以下变量由入口文件同时传给两个阶段，不能在中间单独修改：
 
-以下结构参数会由脚本同时传给两个阶段，不能在中间单独修改：
-
-- `HJ_GNN_LAYERS`
-- `HJ_GNN_OUT_DIM`
-- `HJ_HIDDEN_DIM`
-- `HJ_HIDDEN_LAYERS`
-- `HJ_CONSTRAINT_SCALE`
-- `HJ_AGENT_MARGIN`
-- `HJ_OBSTACLE_MARGIN`
-- `HJ_BRAKING_ACCEL`
+- `hj_gnn_layers`
+- `hj_gnn_out_dim`
+- `hj_hidden_dim`
+- `hj_hidden_layers`
+- `hj_lambda_init`
+- `hj_lambda_final`
+- `hj_lambda_decay_steps`
+- `hj_constraint_scale`
+- `hj_agent_margin`
+- `hj_obstacle_margin`
 
 第二阶段常用参数：
 
-- `HJ_CBF_ALPHA`
-- `HJ_CBF_MARGIN`
-- `HJ_CBF_EPS`
-- `CBF_WEIGHT`
-- `NO_CBF_SCHEDULE=1`
-- `RL_USE_RNN=1`
-- `RL_NO_VIDEO=1`
+- `hj_cbf_alpha`
+- `hj_cbf_margin`
+- `hj_cbf_eps`
+- `cbf_weight`
+- `rl_steps`
+- `rl_n_env_train`
+- `rl_batch_size`
 
-## 5. 恢复训练
+入口显式传递这些参数，但 Python CLI 中既有参数的默认值保持不变；直接运行原来的 `train.py`、`train_safety_filter.py` 或 `train.sh` 时不会自动套用本实验配置。
 
-第一阶段保存 online/target 参数、optimizer、replay、replay RNG 和采样 JAX PRNG key。使用同一个输出目录恢复：
+## 5. 恢复说明
 
-```bash
-STAGE=hj \
-HJ_RESUME=1 \
-RUN_ROOT=/data/experiments/hj_informarl_seed0 \
-./scripts/train_hj_informarl_two_stage.sh
-```
-
-为避免误覆盖，HJ checkpoint 已存在时脚本会停止；应显式设置 `HJ_RESUME=1`，或使用新的 `RUN_ROOT` 开始另一组训练。
-
-第二阶段恢复（`RL_STEPS` 是恢复后的目标总 iteration，不是追加量）：
-
-```bash
-STAGE=rl \
-RL_RESUME_DIR=/path/to/previous/run/models/latest \
-RL_STEPS=300000 \
-./scripts/train_hj_informarl_two_stage.sh
-```
-
-新格式的第二阶段 checkpoint 会同时保存 actor/reward critic optimizer、算法与 rollout PRNG、NumPy shuffle 状态、更新计数器和冻结的 HJ critic，因此可以做完整状态续训。旧 checkpoint 缺少这些 sidecar 时会明确提示并降级为参数 warm-start。即使状态完整，不同进程、XLA 版本或硬件上的浮点归约仍可能造成细微数值差异，不承诺 bitwise identical。
-
-训练正常结束后的 `latest` 标记指向最后一次更新的下一 iteration；用相同的 `RL_STEPS` 恢复会被识别为已经完成。若要继续，应把 `RL_STEPS` 设为更大的目标值。若启用了依赖总步数的 CBF schedule，延长目标总步数会重新定义 schedule 边界，因此不等价于从一开始就使用更长的目标训练。
+当前入口默认执行 fresh training；检测到同目录 HJ checkpoint 时会停止，避免误覆盖。需要恢复时直接使用 Python 入口的 `--resume` 或 `--resume-dir`，而不是改变默认参数或复用 fresh-training 脚本。
 
 ## 6. 输出目录
 
@@ -169,7 +133,7 @@ rl/
     └── videos/latest_eval.mp4
 ```
 
-根目录下的 `training_metrics.jsonl` 和 `console.log` 由两个阶段共同追加。在线 W&B 模式下，脚本还会生成并保存一个稳定的 `wandb_run_id`，两个进程用同一个 project、run ID 和 run name；因此页面上是一条连续的两阶段 run，而不是两个互不关联的实验。可通过 `WANDB_PROJECT`、`WANDB_NAME`、`WANDB_RUN_ID` 覆盖默认值。
+根目录下的 `training_metrics.jsonl` 和 `console.log` 由两个阶段共同追加。在线 W&B 模式下，脚本还会生成并保存一个稳定的 `wandb_run_id`，两个进程使用同一个 project、run ID 和 run name，因此页面上是一条连续的两阶段 run。
 
 没有 FFmpeg 时视频自动降级为 GIF；渲染失败只给出警告，不会阻止 scalar 日志或 checkpoint 保存。
 
@@ -204,20 +168,27 @@ rl/
 ## 8. 开跑前检查
 
 ```bash
-bash -n scripts/train_hj_informarl_two_stage.sh
+bash -n train_hj_informarl.sh
 python train_safety_filter.py --help
 python train.py --help
 ```
 
-建议先用很小的步数做 smoke test：
+建议第一次运行前先在 `train_hj_informarl.sh` 顶部暂时改成小规模配置：
 
 ```bash
-RUN_ROOT=/tmp/hj_informarl_smoke \
-HJ_STEPS=2 HJ_N_ENV=1 HJ_ROLLOUT_STEPS=2 \
-HJ_UPDATES_PER_COLLECT=1 HJ_WARMUP=1 HJ_BATCH_SIZE=1 HJ_REPLAY_SIZE=4 \
-HJ_SAVE_INTERVAL=1 HJ_LOG_INTERVAL=1 HJ_EVAL_INTERVAL=1 HJ_EVAL_N_ENV=1 \
-RL_STEPS=1 RL_N_ENV_TRAIN=1 RL_N_ENV_TEST=1 RL_BATCH_SIZE=128 \
-RL_EVAL_INTERVAL=1 RL_SAVE_INTERVAL=1 RL_NO_VIDEO=1 \
-WANDB_MODE=disabled \
-./scripts/train_hj_informarl_two_stage.sh
+wandb_mode="disabled"
+run_root="/tmp/hj_informarl_smoke"
+hj_steps=2
+hj_n_env=1
+hj_rollout_steps=2
+hj_updates_per_collect=1
+hj_warmup=1
+hj_batch_size=1
+hj_replay_size=4
+rl_steps=1
+rl_n_env_train=1
+rl_n_env_test=1
+rl_batch_size=128
 ```
+
+然后运行 `./train_hj_informarl.sh`。确认流程后再恢复正式参数并使用新的 `run_root`。
