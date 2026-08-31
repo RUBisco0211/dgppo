@@ -10,3 +10,6 @@ python train.py --env LidarSpread --algo dgppo -n 3 --obs 3 \
 
 # For small GPUs:
 #   --n-env-train 16 --batch-size 2048
+
+# Two-stage Deep-QP training: Graph-HJ pretraining, then constrained InforMARL.
+# python train.py --env LidarSpread --algo deepqp -n 3 --obs 3

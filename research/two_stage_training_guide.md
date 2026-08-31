@@ -20,120 +20,87 @@ $$
 
 ## 2. 一条命令运行两个阶段
 
-训练入口与原仓库的 `train.sh` 放在同一级：
-
-```text
-train_hj_informarl.sh
-```
-
-默认配置为 LidarEnv 系列的 `LidarTarget` 场景、3 个 agent、3 个 obstacle、seed 0，并使用 W&B offline 模式：
+`deepqp` 是 `train.py` 中的组合训练入口。LidarEnv 上直接运行：
 
 ```bash
-./train_hj_informarl.sh
+python train.py --env LidarSpread --algo deepqp -n 3 --obs 3
 ```
 
-本方法的实验参数全部显式写在该文件顶部，分为以下几组：
+该命令会自动完成：
 
-- shared environment/logging；
-- Stage 1 Graph-HJ replay、优化器和网络参数；
-- 两阶段共用的 HJ 结构与连续约束参数；
-- Stage 2 InforMARL/PPO 与 HJ-CBF 参数。
+1. 创建统一实验目录和 W&B run ID；
+2. 运行 Stage 1 Graph-HJ off-policy 预训练；
+3. 加载并冻结刚生成的 `deep_qp_safety.pkl`；
+4. 运行 Stage 2 `informarl_hj_crpo`。
 
-服务器开跑前直接编辑文件，例如把：
+无需额外 shell 入口，也无需手工传递 checkpoint。`--steps` 仍表示第二阶段的 PPO 训练步数；第一阶段使用独立的 `--deep-qp-pretrain-steps`。
+
+## 3. 需要时手工分阶段运行
+
+正常训练不需要使用本节。只训练 HJ critic 时仍可直接调用底层入口：
 
 ```bash
-python_bin="/path/to/conda/env/bin/python"
-wandb_mode="online"
-env_id="LidarTarget"
-seed=0
+python train_safety_filter.py --env LidarSpread -n 3 --obs 3 \
+  --output-dir ./logs/deep_qp_safety/lidar_spread
 ```
 
-这样不会为了某一次实验而修改 `train.py` 或 `train_safety_filter.py` 原有 CLI 默认参数。
-
-## 3. 分阶段运行
-
-只训练 HJ critic：
+已有 HJ checkpoint 时只训练 RL：
 
 ```bash
-./train_hj_informarl.sh hj
+python train.py --env LidarSpread --algo informarl_hj_crpo -n 3 --obs 3 \
+  --deep-qp-checkpoint ./logs/deep_qp_safety/lidar_spread/deep_qp_safety.pkl
 ```
-
-HJ checkpoint 已存在时只训练 RL：
-
-```bash
-./train_hj_informarl.sh rl
-```
-
-两个阶段分别提交时不要修改 `run_root`，第二阶段会读取 `${run_root}/deep-qp/deep_qp_safety.pkl`，并复用根目录保存的 W&B run ID。
 
 ## 4. 参数组织原则
 
-以下变量由入口文件同时传给两个阶段，不能在中间单独修改：
+以下 `train.py` 参数由组合入口同时传给两个阶段，保证 checkpoint 的网络结构和安全约束定义一致：
 
-- `hj_gnn_layers`
-- `hj_gnn_out_dim`
-- `hj_hidden_dim`
-- `hj_hidden_layers`
-- `hj_lambda_init`
-- `hj_lambda_final`
-- `hj_lambda_decay_steps`
-- `hj_constraint_scale`
-- `hj_agent_margin`
-- `hj_obstacle_margin`
+- `--deep-qp-gnn-layers`
+- `--deep-qp-gnn-out-dim`
+- `--deep-qp-hidden-dim`
+- `--deep-qp-hidden-layers`
+- `--deep-qp-lambda-init`
+- `--deep-qp-lambda-final`
+- `--deep-qp-lambda-decay-steps`
+- `--deep-qp-constraint-scale`
+- `--deep-qp-agent-margin`
+- `--deep-qp-obstacle-margin`
 
-第二阶段常用参数：
+第一阶段常用参数：
 
-- `hj_cbf_alpha`
-- `hj_cbf_margin`
-- `hj_cbf_eps`
-- `cbf_weight`
-- `rl_steps`
-- `rl_n_env_train`
-- `rl_batch_size`
+- `--deep-qp-pretrain-steps`
+- `--deep-qp-pretrain-n-env`
+- `--deep-qp-pretrain-rollout-steps`
+- `--deep-qp-pretrain-updates-per-collect`
+- `--deep-qp-pretrain-warmup`
+- `--deep-qp-pretrain-batch-size`
+- `--deep-qp-pretrain-replay-size`
 
-入口显式传递这些参数，但 Python CLI 中既有参数的默认值保持不变；直接运行原来的 `train.py`、`train_safety_filter.py` 或 `train.sh` 时不会自动套用本实验配置。
+第二阶段继续使用原有参数，例如 `--steps`、`--n-env-train`、`--batch-size`、`--hj-cbf-alpha`、`--hj-cbf-margin`、`--hj-cbf-eps` 和 `--cbf-weight`。组合入口没有修改其他算法的默认值；它只为 Stage 1 增加了 `--deep-qp-pretrain-*` 参数组。
 
 ## 5. 恢复说明
 
-当前入口默认执行 fresh training；检测到同目录 HJ checkpoint 时会停止，避免误覆盖。需要恢复时直接使用 Python 入口的 `--resume` 或 `--resume-dir`，而不是改变默认参数或复用 fresh-training 脚本。
+`--algo deepqp` 当前只负责 fresh two-stage training，不接受 `--resume-dir`。只恢复第一阶段时使用 `train_safety_filter.py --resume <checkpoint>`；只恢复第二阶段时使用 `--algo informarl_hj_crpo --resume-dir <run>`。
 
 ## 6. 输出目录
 
 默认输出根目录为：
 
 ```text
-logs/two_stage/<env>_n<agents>_o<obstacles>_seed<seed>/
-├── console.log
+logs/<env>/deepqp/seed<seed>_<timestamp>_<id>/
 ├── training_metrics.jsonl
 ├── wandb_run_id
 ├── deep-qp/
-└── rl/
-```
-
-第一阶段产生：
-
-```text
-deep-qp/
-├── console.log
-├── deep_qp_safety.pkl
-├── deep_qp_replay.pkl
-└── deep_qp_training_state.pkl
-```
-
-第二阶段产生：
-
-```text
-rl/
-├── console.log
-└── <env>/informarl_hj_crpo/<run>/
+│   ├── deep_qp_safety.pkl
+│   ├── deep_qp_replay.pkl
+│   └── deep_qp_training_state.pkl
+└── rl/<env>/informarl_hj_crpo/<run>/
     ├── config.yaml
     ├── models/latest/
-    │   ├── algo_training_state.pkl
-    │   └── trainer_state.pkl
     └── videos/latest_eval.mp4
 ```
 
-根目录下的 `training_metrics.jsonl` 和 `console.log` 由两个阶段共同追加。在线 W&B 模式下，脚本还会生成并保存一个稳定的 `wandb_run_id`，两个进程使用同一个 project、run ID 和 run name，因此页面上是一条连续的两阶段 run。
+根目录下的 `training_metrics.jsonl` 由两个阶段共同追加。组合入口生成并保存稳定的 `wandb_run_id`，两个阶段使用同一个 project、run ID 和 run name，因此页面上是一条连续的两阶段 run。
 
 没有 FFmpeg 时视频自动降级为 GIF；渲染失败只给出警告，不会阻止 scalar 日志或 checkpoint 保存。
 
@@ -168,27 +135,22 @@ rl/
 ## 8. 开跑前检查
 
 ```bash
-bash -n train_hj_informarl.sh
 python train_safety_filter.py --help
 python train.py --help
 ```
 
-建议第一次运行前先在 `train_hj_informarl.sh` 顶部暂时改成小规模配置：
+可用下面的一行命令做端到端 smoke test，而不修改任何默认参数：
 
 ```bash
-wandb_mode="disabled"
-run_root="/tmp/hj_informarl_smoke"
-hj_steps=2
-hj_n_env=1
-hj_rollout_steps=2
-hj_updates_per_collect=1
-hj_warmup=1
-hj_batch_size=1
-hj_replay_size=4
-rl_steps=1
-rl_n_env_train=1
-rl_n_env_test=1
-rl_batch_size=128
+python train.py --env LidarSpread --algo deepqp -n 2 --obs 1 \
+  --deep-qp-pretrain-steps 1 --deep-qp-pretrain-n-env 1 \
+  --deep-qp-pretrain-rollout-steps 2 \
+  --deep-qp-pretrain-updates-per-collect 1 \
+  --deep-qp-pretrain-warmup 1 --deep-qp-pretrain-batch-size 1 \
+  --deep-qp-pretrain-replay-size 4 --deep-qp-pretrain-save-interval 1 \
+  --deep-qp-pretrain-log-interval 1 --deep-qp-pretrain-eval-interval 1 \
+  --deep-qp-pretrain-eval-n-env 1 --deep-qp-gnn-out-dim 8 \
+  --deep-qp-hidden-dim 16 --deep-qp-hidden-layers 1 --steps 0 \
+  --n-env-train 1 --n-env-test 1 --batch-size 128 \
+  --no-rnn --no-video --wandb-mode disabled --log-dir /tmp/deepqp-smoke
 ```
-
-然后运行 `./train_hj_informarl.sh`。确认流程后再恢复正式参数并使用新的 `run_root`。

@@ -1,7 +1,9 @@
 import argparse
+import copy
 import datetime
 import os
 import pickle
+from pathlib import Path
 
 # These must be set before importing modules that may import JAX/XLA.
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
@@ -48,7 +50,7 @@ def _checkpoint_iter(load_dir: str, step: str):
     return None
 
 
-def train(args):
+def _train_rl(args):
     print(f"> Running train.py {args}")
 
     # set up environment variables and seed
@@ -260,6 +262,115 @@ def train(args):
     trainer.train()
 
 
+def _train_deepqp(args):
+    """Run Graph-HJ pretraining and HJ-constrained InforMARL sequentially."""
+    if args.resume_dir is not None:
+        raise ValueError(
+            "--algo deepqp starts a fresh two-stage run; use "
+            "--algo informarl_hj_crpo with --resume-dir to resume stage 2"
+        )
+
+    if args.wandb_mode == "auto":
+        args.wandb_mode = "online" if is_connected() else "offline"
+    if args.debug:
+        args.wandb_mode = "disabled"
+
+    timestamp = datetime.datetime.now().strftime("%m%d%H%M%S")
+    random_id = "".join(
+        chr(value) for value in np.random.default_rng().integers(65, 91, size=4)
+    )
+    run_root = Path(args.log_dir) / args.env / "deepqp" / (
+        f"seed{args.seed}_{timestamp}_{random_id}"
+    )
+    hj_dir = run_root / "deep-qp"
+    rl_log_dir = run_root / "rl"
+    metrics_log_file = run_root / "training_metrics.jsonl"
+    run_root.mkdir(parents=True, exist_ok=False)
+    hj_dir.mkdir()
+    rl_log_dir.mkdir()
+
+    wandb_run_id = args.wandb_run_id or (
+        f"deepqp_{args.seed}_{timestamp}_{random_id}"
+    )
+    wandb_name = args.wandb_name or (
+        f"deepqp_{args.env}_n{args.num_agents}_o{args.obs}_seed{args.seed}"
+    )
+    (run_root / "wandb_run_id").write_text(wandb_run_id + "\n", encoding="utf-8")
+
+    lambda_init = (
+        0.1 if args.deep_qp_lambda_init is None else args.deep_qp_lambda_init
+    )
+    lambda_final = (
+        0.0001 if args.deep_qp_lambda_final is None else args.deep_qp_lambda_final
+    )
+
+    safety_args = argparse.Namespace(
+        env=args.env,
+        num_agents=args.num_agents,
+        obs=args.obs,
+        n_rays=args.n_rays,
+        full_observation=args.full_observation,
+        seed=args.seed,
+        steps=args.deep_qp_pretrain_steps,
+        n_env=args.deep_qp_pretrain_n_env,
+        rollout_steps=args.deep_qp_pretrain_rollout_steps,
+        updates_per_collect=args.deep_qp_pretrain_updates_per_collect,
+        warmup=args.deep_qp_pretrain_warmup,
+        batch_size=args.deep_qp_pretrain_batch_size,
+        replay_size=args.deep_qp_pretrain_replay_size,
+        gnn_layers=args.deep_qp_gnn_layers,
+        gnn_out_dim=args.deep_qp_gnn_out_dim,
+        hidden_dim=args.deep_qp_hidden_dim,
+        hidden_layers=args.deep_qp_hidden_layers,
+        lr=args.deep_qp_lr,
+        lr_final=args.deep_qp_lr_final,
+        max_grad_norm=2.0,
+        tau=args.deep_qp_tau,
+        lambda_init=lambda_init,
+        lambda_final=lambda_final,
+        lambda_decay_steps=args.deep_qp_lambda_decay_steps,
+        constraint_scale=args.deep_qp_constraint_scale,
+        agent_margin=args.deep_qp_agent_margin,
+        obstacle_margin=args.deep_qp_obstacle_margin,
+        braking_accel=args.deep_qp_braking_accel,
+        output_dir=str(hj_dir),
+        resume=None,
+        save_interval=args.deep_qp_pretrain_save_interval,
+        log_interval=args.deep_qp_pretrain_log_interval,
+        eval_interval=args.deep_qp_pretrain_eval_interval,
+        eval_n_env=args.deep_qp_pretrain_eval_n_env,
+        log_file=str(metrics_log_file.resolve()),
+        wandb_mode=args.wandb_mode,
+        wandb_project=args.wandb_project,
+        wandb_name=wandb_name,
+        wandb_run_id=wandb_run_id,
+        debug=args.debug,
+    )
+
+    from train_safety_filter import train as train_safety_critic
+
+    print("> Deep-QP stage 1/2: pretraining Graph-HJ value")
+    train_safety_critic(safety_args)
+
+    rl_args = copy.deepcopy(args)
+    rl_args.algo = "informarl_hj_crpo"
+    rl_args.deep_qp_checkpoint = str(hj_dir / "deep_qp_safety.pkl")
+    rl_args.log_dir = str(rl_log_dir)
+    rl_args.metrics_log_file = str(metrics_log_file.resolve())
+    rl_args.wandb_run_id = wandb_run_id
+    rl_args.wandb_name = wandb_name
+    rl_args.name = "deepqp"
+
+    print("> Deep-QP stage 2/2: training InforMARL with HJ constraints")
+    _train_rl(rl_args)
+
+
+def train(args):
+    if args.algo == "deepqp":
+        return _train_deepqp(args)
+    return _train_rl(args)
+
+
 def main():
     parser = argparse.ArgumentParser()
 
@@ -316,6 +427,19 @@ def main():
     parser.add_argument("--deep-qp-agent-margin", type=float, default=0.02)
     parser.add_argument("--deep-qp-obstacle-margin", type=float, default=0.02)
     parser.add_argument("--deep-qp-braking-accel", type=float, default=None)
+    parser.add_argument("--deep-qp-pretrain-steps", type=int, default=1_000_000)
+    parser.add_argument("--deep-qp-pretrain-n-env", type=int, default=32)
+    parser.add_argument("--deep-qp-pretrain-rollout-steps", type=int, default=32)
+    parser.add_argument(
+        "--deep-qp-pretrain-updates-per-collect", type=int, default=32
+    )
+    parser.add_argument("--deep-qp-pretrain-warmup", type=int, default=20_000)
+    parser.add_argument("--deep-qp-pretrain-batch-size", type=int, default=256)
+    parser.add_argument("--deep-qp-pretrain-replay-size", type=int, default=1_000_000)
+    parser.add_argument("--deep-qp-pretrain-save-interval", type=int, default=10_000)
+    parser.add_argument("--deep-qp-pretrain-log-interval", type=int, default=100)
+    parser.add_argument("--deep-qp-pretrain-eval-interval", type=int, default=1_000)
+    parser.add_argument("--deep-qp-pretrain-eval-n-env", type=int, default=8)
     parser.add_argument("--hj-cbf-alpha", type=float, default=1.0)
     parser.add_argument("--hj-cbf-margin", type=float, default=0.0)
     parser.add_argument("--hj-cbf-eps", type=float, default=0.0)

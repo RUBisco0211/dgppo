@@ -124,6 +124,7 @@ We provide the following algorithms:
 - `dgppo`: Discrete GCBF Proximal Policy Optimization.
 - `informarl`: [MAPPO](https://github.com/marlbenchmark/on-policy) with GNN ([Scalable Multi-Agent Reinforcement Learning through Intelligent Information Aggregation](https://github.com/nsidn98/InforMARL/)).
 - `informarl_lagr`: [MAPPO-Lagrangian](https://github.com/chauncygu/Multi-Agent-Constrained-Policy-Optimisation) with GNN. Replaced the sum-over-time cost with max-over-time cost.
+- `deepqp`: Two-stage entry point that first pretrains the distributed Graph-HJ critic, then freezes it and runs `informarl_hj_crpo`.
 - `informarl_hj_crpo`: InforMARL with a separately trained distributed Graph-HJ critic and DGPPO-style per-sample task/safety advantage mixing. It does not apply a runtime QP. See [the integration design](research/informarl_hj_crpo_design.md).
 - `hcbfcrpo`: DGPPO but replace the learned GCBF with a hand-crafted CBF.
 
@@ -137,19 +138,18 @@ To train the `<algo>` algorithm on the `<env>` environment with `<n_agent>` agen
 python train.py --env <env> --algo <algo> -n <n_agent> --obs <n_obs>
 ```
 
-`informarl_hj_crpo` requires a pretrained Graph-HJ critic for a new PPO run:
+Run the complete Graph-HJ pretraining and constrained InforMARL pipeline with:
 
 ```bash
-python train_safety_filter.py --env LidarTarget -n 3 --obs 3 \
-  --output-dir ./logs/deep_qp_safety/lidar_target
-python train.py --env LidarTarget --algo informarl_hj_crpo -n 3 --obs 3 --no-rnn \
-  --deep-qp-checkpoint ./logs/deep_qp_safety/lidar_target/deep_qp_safety.pkl
+python train.py --env LidarSpread --algo deepqp -n 3 --obs 3
 ```
 
-The method-specific parameters are written explicitly in
-[`train_hj_informarl.sh`](train_hj_informarl.sh), following the style of
-`train.sh` without changing the original Python CLI defaults. For details, see the
-[two-stage training guide](research/two_stage_training_guide.md).
+`deepqp` creates one experiment root, runs the two stages sequentially, reuses one
+W&B run, and appends both stages to one local metrics file. Its HJ pretraining
+parameters use the `--deep-qp-pretrain-*` flags; existing `train.py` defaults for
+other algorithms are unchanged. A separately pretrained checkpoint can still be
+used directly with `--algo informarl_hj_crpo --deep-qp-checkpoint <path>`. For
+details, see the [two-stage training guide](research/two_stage_training_guide.md).
 
 The training logs will be saved in `logs/<env>/<algo>/seed<seed>_<timestamp>_<four random letters>`. We provide the following flags:
 
