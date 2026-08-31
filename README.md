@@ -124,9 +124,7 @@ We provide the following algorithms:
 - `dgppo`: Discrete GCBF Proximal Policy Optimization.
 - `informarl`: [MAPPO](https://github.com/marlbenchmark/on-policy) with GNN ([Scalable Multi-Agent Reinforcement Learning through Intelligent Information Aggregation](https://github.com/nsidn98/InforMARL/)).
 - `informarl_lagr`: [MAPPO-Lagrangian](https://github.com/chauncygu/Multi-Agent-Constrained-Policy-Optimisation) with GNN. Replaced the sum-over-time cost with max-over-time cost.
-- `deepqp`: Two-stage method that first pretrains the distributed Graph-HJ critic, then freezes it and applies DGPPO-style per-sample task/safety advantage mixing. It is not CRPO and does not apply a runtime QP.
-- `informarl_hj_crpo`: Legacy code identifier for the second stage of `deepqp`; despite the identifier, its update is not CRPO. See the [unified Deep-QP design and training document](research/deepqp_marl_design.md).
-- `hcbfcrpo`: DGPPO but replace the learned GCBF with a hand-crafted CBF.
+- `deepqp`: Two-stage method that first pretrains the distributed Graph-HJ critic, then freezes it and applies DGPPO-style per-sample task/safety advantage mixing. It does not apply a runtime QP. See the [unified Deep-QP design and training document](research/deepqp_marl_design.md).
 
 ## Usage
 
@@ -148,9 +146,7 @@ python train.py --env LidarSpread --algo deepqp -n 3 --obs 3
 W&B run, and appends both stages to one local metrics file. Its HJ pretraining
 parameters use the `--deep-qp-pretrain-*` flags and do not override the original
 algorithms' optimization hyperparameters or update rules. Shared logging,
-checkpoint, and W&B behavior has been enhanced for every algorithm. A separately
-pretrained checkpoint can still be used directly with
-`--algo informarl_hj_crpo --deep-qp-checkpoint <path>`. For details, see the
+checkpoint, and W&B behavior has been enhanced for every algorithm. For details, see the
 [unified Deep-QP design and training document](research/deepqp_marl_design.md).
 
 The training logs will be saved in `logs/<env>/<algo>/seed<seed>_<timestamp>_<four random letters>`. We provide the following flags:
@@ -164,10 +160,10 @@ The training logs will be saved in `logs/<env>/<algo>/seed<seed>_<timestamp>_<fo
 
 #### For algorithms
 
-- `--no-cbf-schedule`: [For dgppo, hcbfcrpo, and informarl_hj_crpo] Remove the CBF schedule, default False.
-- `--cbf-weight`: [For dgppo, hcbfcrpo, and informarl_hj_crpo] Weight of the CBF loss, default 1.0.
-- `--cbf-eps`: [For dgppo and hcbrcrpo] Epsilon of the CBF loss, default 0.01.
-- `--alpha`: [For dgppo and hcbrcrpo] The class-$\kappa$ function, default 10.0.
+- `--no-cbf-schedule`: [For safety-constrained algorithms] Remove the CBF schedule, default False.
+- `--cbf-weight`: [For safety-constrained algorithms] Weight of the CBF loss, default 1.0.
+- `--cbf-eps`: [For DGPPO-style safety updates] Epsilon of the CBF loss, default 0.01.
+- `--alpha`: [For DGPPO-style safety updates] The class-$\kappa$ function, default 10.0.
 - `--cost-weight`: [For informarl] Weight of the cost term in the reward, default 0.0.
 - `--cost-schedule`: [For informarl] Use the cost schedule, default False.
 - `--lagr-init`: [For informarl_lagr] Initial value of the Lagrangian multiplier, default 0.5.
