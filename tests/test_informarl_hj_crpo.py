@@ -7,6 +7,7 @@ import numpy as np
 from dgppo.algo.informarl_deep_qp import (
     InforMARLHJCRPO,
     aggregate_owner_violation,
+    mix_hj_advantages,
 )
 from dgppo.env.vmas.vmas_navigation import VMASNavigation
 from dgppo.trainer.data import Rollout
@@ -21,6 +22,12 @@ class InforMARLHJCRPOTest(unittest.TestCase):
         ])
         owner_violation = aggregate_owner_violation(violation, action_mask)
         np.testing.assert_allclose(owner_violation, np.array([[1.0, 2.0], [3.0, 3.0]]))
+
+    def test_advantage_mixing_matches_dgppo_rule(self):
+        task_advantage = jnp.array([[2.0, -1.0], [4.0, 3.0]])
+        owner_violation = jnp.array([[0.0, 0.5], [1.5, 0.0]])
+        mixed = mix_hj_advantages(task_advantage, owner_violation, cbf_weight=2.0)
+        np.testing.assert_allclose(mixed, np.array([[2.0, -1.0], [-3.0, 3.0]]))
 
     def test_execution_keeps_standard_rollout_semantics(self):
         env = VMASNavigation(
@@ -54,7 +61,8 @@ class InforMARLHJCRPOTest(unittest.TestCase):
             "Vl/loss",
             "policy/loss",
             "hj_crpo/constraint_estimate",
-            "hj_crpo/safety_update",
+            "hj_crpo/safe_data",
+            "hj_crpo/cbf_weight",
             "hj_crpo/violation_mean",
         ):
             self.assertIn(key, info)

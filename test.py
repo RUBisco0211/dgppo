@@ -92,7 +92,8 @@ def test(args):
         hj_cbf_alpha=getattr(config, "hj_cbf_alpha", 1.0),
         hj_cbf_margin=getattr(config, "hj_cbf_margin", 0.0),
         hj_cbf_eps=getattr(config, "hj_cbf_eps", 0.0),
-        crpo_threshold=getattr(config, "crpo_threshold", 0.0),
+        cbf_weight=getattr(config, "cbf_weight", 1.0),
+        cbf_schedule=getattr(config, "cbf_schedule", True),
     )
     algo.load(model_path, step)
     if args.stochastic:

@@ -154,7 +154,6 @@ def train(args):
         hj_cbf_alpha=args.hj_cbf_alpha,
         hj_cbf_margin=args.hj_cbf_margin,
         hj_cbf_eps=args.hj_cbf_eps,
-        crpo_threshold=args.crpo_threshold,
     )
 
     start_step = 0
@@ -286,7 +285,6 @@ def main():
     parser.add_argument("--hj-cbf-alpha", type=float, default=1.0)
     parser.add_argument("--hj-cbf-margin", type=float, default=0.0)
     parser.add_argument("--hj-cbf-eps", type=float, default=0.0)
-    parser.add_argument("--crpo-threshold", type=float, default=0.0)
 
     # NN arguments
     parser.add_argument("--actor-gnn-layers", type=int, default=2)

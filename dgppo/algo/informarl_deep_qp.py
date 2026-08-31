@@ -1,4 +1,4 @@
-"""InforMARL with a frozen Graph-HJ critic and CRPO-style policy updates."""
+"""InforMARL with a frozen Graph-HJ critic and DGPPO-style mixed updates."""
 
 import functools as ft
 from pathlib import Path
@@ -9,6 +9,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import jax.tree_util as jtu
 import numpy as np
+import optax
 from flax.training.train_state import TrainState
 from jax import lax
 
@@ -39,8 +40,18 @@ def aggregate_owner_violation(violation: Array, action_mask: Array) -> Array:
     )
 
 
+def mix_hj_advantages(
+        task_advantage: Array,
+        owner_violation: Array,
+        cbf_weight: Array | float,
+) -> Array:
+    """Apply DGPPO's per-sample task/safety advantage mixing rule."""
+    is_safe = owner_violation <= 0.0
+    return jnp.where(is_safe, task_advantage, 0.0) - cbf_weight * owner_violation
+
+
 class InforMARLHJCRPO(InforMARL):
-    """CTDE PPO with CRPO switching driven by a pretrained Graph-HJ critic.
+    """CTDE PPO with DGPPO-style mixing driven by a pretrained Graph-HJ critic.
 
     Execution is the ordinary decentralized InforMARL actor. During centralized
     training, the frozen critic evaluates each local HJ constraint using the
@@ -68,10 +79,12 @@ class InforMARLHJCRPO(InforMARL):
             hj_cbf_alpha: float = 1.0,
             hj_cbf_margin: float = 0.0,
             hj_cbf_eps: float = 0.0,
-            crpo_threshold: float = 0.0,
+            cbf_weight: float = 1.0,
+            cbf_schedule: bool = True,
+            train_steps: int = 100_000,
             **kwargs,
     ):
-        super().__init__(*args, **kwargs)
+        super().__init__(*args, train_steps=train_steps, **kwargs)
         if not isinstance(self._env, VMASNavigation):
             raise ValueError(
                 "InforMARLHJCRPO currently targets VMASNavigation and "
@@ -79,8 +92,8 @@ class InforMARLHJCRPO(InforMARL):
             )
         if hj_cbf_alpha < 0.0:
             raise ValueError("hj_cbf_alpha must be non-negative")
-        if hj_cbf_eps < 0.0 or crpo_threshold < 0.0:
-            raise ValueError("hj_cbf_eps and crpo_threshold must be non-negative")
+        if hj_cbf_eps < 0.0 or cbf_weight < 0.0:
+            raise ValueError("hj_cbf_eps and cbf_weight must be non-negative")
 
         dt = self._env.dt
         critic_config = DeepQPSafetyConfig(
@@ -118,7 +131,18 @@ class InforMARLHJCRPO(InforMARL):
         self.hj_cbf_alpha = hj_cbf_alpha
         self.hj_cbf_margin = hj_cbf_margin
         self.hj_cbf_eps = hj_cbf_eps
-        self.crpo_threshold = crpo_threshold
+        self.cbf_weight = cbf_weight
+        self.cbf_schedule = cbf_schedule
+        if cbf_schedule:
+            self.cbf_schedule_fn = optax.piecewise_constant_schedule(
+                init_value=cbf_weight,
+                boundaries_and_scales={
+                    int(train_steps * 0.5): 2.0,
+                    int(train_steps * 0.75): 2.0,
+                },
+            )
+        else:
+            self.cbf_schedule_fn = optax.constant_schedule(cbf_weight)
 
         if deep_qp_checkpoint is not None:
             self.load_safety_checkpoint(deep_qp_checkpoint)
@@ -132,7 +156,8 @@ class InforMARLHJCRPO(InforMARL):
             "hj_cbf_alpha": self.hj_cbf_alpha,
             "hj_cbf_margin": self.hj_cbf_margin,
             "hj_cbf_eps": self.hj_cbf_eps,
-            "crpo_threshold": self.crpo_threshold,
+            "cbf_weight": self.cbf_weight,
+            "cbf_schedule": self.cbf_schedule,
             **{
                 f"deep_qp_{key}": value
                 for key, value in self.safety_critic.config.to_dict().items()
@@ -150,7 +175,6 @@ class InforMARLHJCRPO(InforMARL):
         )
 
     def update(self, rollout: Rollout, step: int) -> dict:
-        del step
         graph_clean = rollout.graph._replace(env_states=None)
         next_graph_clean = rollout.next_graph._replace(env_states=None)
         rollout = rollout._replace(graph=graph_clean, next_graph=next_graph_clean)
@@ -174,6 +198,7 @@ class InforMARLHJCRPO(InforMARL):
                 rollout,
                 batch_idx,
                 rnn_chunk_ids,
+                jnp.asarray(step),
             )
         return update_info
 
@@ -190,6 +215,7 @@ class InforMARLHJCRPO(InforMARL):
             rollout: Rollout,
             batch_idx: Array,
             rnn_chunk_ids: Array,
+            step: Array,
     ) -> Tuple[TrainState, TrainState, dict]:
         b, T, a, _ = rollout.actions.shape
 
@@ -258,13 +284,11 @@ class InforMARLHJCRPO(InforMARL):
         bTa_owner_violation = aggregate_owner_violation(
             bTa_violation, certificate.action_mask
         )
-        owner_mean = bTa_owner_violation.mean(axis=1, keepdims=True)
-        owner_std = bTa_owner_violation.std(axis=1, keepdims=True)
-        bTa_safety_A = -(bTa_owner_violation - owner_mean) / (owner_std + 1e-8)
-
+        current_cbf_weight = self.cbf_schedule_fn(step)
+        bTa_A = mix_hj_advantages(
+            bTa_task_A, bTa_owner_violation, current_cbf_weight
+        )
         constraint_estimate = bTa_violation.max(axis=-1).mean()
-        use_safety_update = constraint_estimate > self.crpo_threshold
-        bTa_A = jnp.where(use_safety_update, bTa_safety_A, bTa_task_A)
         assert bTa_A.shape == (b, T, a)
 
         def update_fn(carry, idx):
@@ -287,7 +311,8 @@ class InforMARLHJCRPO(InforMARL):
         )
         info = jtu.tree_map(lambda x: x[-1], info) | {
             "hj_crpo/constraint_estimate": constraint_estimate,
-            "hj_crpo/safety_update": use_safety_update.astype(jnp.float32),
+            "hj_crpo/safe_data": (bTa_owner_violation <= 0.0).mean(),
+            "hj_crpo/cbf_weight": current_cbf_weight,
             "hj_crpo/violation_mean": bTa_violation.mean(),
             "hj_crpo/violation_max": bTa_violation.max(),
             "hj_crpo/residual_min": bTa_residual.min(),
