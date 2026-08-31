@@ -124,7 +124,7 @@ We provide the following algorithms:
 - `dgppo`: Discrete GCBF Proximal Policy Optimization.
 - `informarl`: [MAPPO](https://github.com/marlbenchmark/on-policy) with GNN ([Scalable Multi-Agent Reinforcement Learning through Intelligent Information Aggregation](https://github.com/nsidn98/InforMARL/)).
 - `informarl_lagr`: [MAPPO-Lagrangian](https://github.com/chauncygu/Multi-Agent-Constrained-Policy-Optimisation) with GNN. Replaced the sum-over-time cost with max-over-time cost.
-- `informarl_hj_crpo`: InforMARL with a separately trained distributed Graph-HJ critic and CRPO-style constrained PPO updates. It does not apply a runtime QP. See [the integration design](research/informarl_hj_crpo_design.md).
+- `informarl_hj_crpo`: InforMARL with a separately trained distributed Graph-HJ critic and DGPPO-style per-sample task/safety advantage mixing. It does not apply a runtime QP. See [the integration design](research/informarl_hj_crpo_design.md).
 - `hcbfcrpo`: DGPPO but replace the learned GCBF with a hand-crafted CBF.
 
 ## Usage
@@ -157,8 +157,8 @@ The training logs will be saved in `logs/<env>/<algo>/seed<seed>_<timestamp>_<fo
 
 #### For algorithms
 
-- `--no-cbf-schedule`: [For dgppo and hcbfcrpo] Remove the CBF schedule, default False.
-- `--cbf-weight`: [For dgppo and hcbrcrpo] Weight of the CBF loss, default 1.0.
+- `--no-cbf-schedule`: [For dgppo, hcbfcrpo, and informarl_hj_crpo] Remove the CBF schedule, default False.
+- `--cbf-weight`: [For dgppo, hcbfcrpo, and informarl_hj_crpo] Weight of the CBF loss, default 1.0.
 - `--cbf-eps`: [For dgppo and hcbrcrpo] Epsilon of the CBF loss, default 0.01.
 - `--alpha`: [For dgppo and hcbrcrpo] The class-$\kappa$ function, default 10.0.
 - `--cost-weight`: [For informarl] Weight of the cost term in the reward, default 0.0.

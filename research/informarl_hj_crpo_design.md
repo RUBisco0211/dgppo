@@ -1,10 +1,10 @@
-# InforMARL + Graph-HJ + CRPO 集成设计
+# InforMARL + Graph-HJ + DGPPO 混合更新设计
 
 ## 1. 结论与定位
 
 这个方案可以作为一个可验证的研究基线实现，并继续遵循 CTDE：安全 critic 离线集中训练，RL 阶段使用集中可见的联合动作计算安全更新信号，执行阶段仍然只有共享的局部图 actor。
 
-它不是运行时安全过滤器，也不提供逐步硬安全保证。更准确的名称是：使用 Deep-QP HJ 损失预训练分布式 Graph-HJ critic，再使用类 CRPO 的 PPO 更新训练策略。
+它不是运行时安全过滤器，也不提供逐步硬安全保证。更准确的名称是：使用 Deep-QP HJ 损失预训练分布式 Graph-HJ critic，再照搬 DGPPO 的逐样本 task/safety advantage 混合机制训练策略。
 
 本实现采用以下边界：
 
@@ -165,7 +165,7 @@ $$
 
 这个归因步骤只在 centralized training 使用。执行时 actor 不需要其他智能体动作。
 
-## 6. 类 CRPO 策略更新
+## 6. DGPPO 风格的混合策略更新
 
 任务 advantage 继续使用 InforMARL 的 reward critic 和 GAE，记为：
 
@@ -173,49 +173,45 @@ $$
 A_{j,t}^{\mathrm{task}}
 $$
 
-安全 advantage 用每条轨迹内中心化和标准化后的 owner violation 构造：
+对每个动作拥有者，先判断它参与的局部 HJ 约束是否全部安全：
 
 $$
-A_{j,t}^{\mathrm{safety}}
+s_{j,t}
 =
--
-\frac{
-\ell_{j,t}^{\mathrm{owner}}
--
-\operatorname{mean}_t(\ell_{j,t}^{\mathrm{owner}})
-}{
-\operatorname{std}_t(\ell_{j,t}^{\mathrm{owner}})+10^{-8}
-}
-$$
-
-batch 约束估计为：
-
-$$
-\widehat J_{\mathrm{HJ}}
-=
-\operatorname{mean}_{b,t}
+\mathbf 1
 \left[
-\max_i \ell_{i,b,t}
+\ell_{j,t}^{\mathrm{owner}}=0
 \right]
 $$
 
-CRPO 切换规则为：
+DGPPO 的混合规则被直接迁移为：安全样本保留 task advantage；不安全样本把 task advantage 置零，并沿降低 HJ violation 的方向更新。
 
 $$
 A_{j,t}
 =
+s_{j,t} A_{j,t}^{\mathrm{task}}
+-
+w_t \ell_{j,t}^{\mathrm{owner}}
+$$
+
+CBF 权重使用与 DGPPO 相同的分段调度：
+
+$$
+w_t
+=
 \begin{cases}
-A_{j,t}^{\mathrm{task}},
-&
-\widehat J_{\mathrm{HJ}} \leq \eta
+w_0,
+& t < 0.5T
 \\
-A_{j,t}^{\mathrm{safety}},
-&
-\widehat J_{\mathrm{HJ}} > \eta
+2w_0,
+& 0.5T \leq t < 0.75T
+\\
+4w_0,
+& t \geq 0.75T
 \end{cases}
 $$
 
-选中的 advantage 进入原有 clipped PPO objective。task value critic 始终更新；HJ critic 在 RL 阶段始终冻结。
+混合后的 advantage 进入原有 clipped PPO objective。task value critic 始终更新；HJ critic 在 RL 阶段始终冻结。与上一版 batch-level CRPO switch 不同，这里没有全局阈值，也不会让整个 batch 在 task update 和 safety update 之间二选一。
 
 训练命令示例：
 
@@ -224,7 +220,7 @@ python train.py \
   --env VMASNavigationObs --algo informarl_hj_crpo \
   -n 3 --obs 3 --no-rnn \
   --deep-qp-checkpoint ./logs/deep_qp_safety/vmas_navigation_obs/deep_qp_safety.pkl \
-  --hj-cbf-alpha 1.0 --crpo-threshold 0.01
+  --hj-cbf-alpha 1.0 --cbf-weight 1.0
 ```
 
 `informarl_deep_qp` 暂时保留为同一实现的兼容别名，新实验应使用 `informarl_hj_crpo`。
@@ -248,7 +244,7 @@ RL 阶段：
                                +-> frozen Graph-HJ residual
                                            |
                                            v
-                                  CRPO task/safety switch
+                              DGPPO per-sample advantage mixing
                                            |
                                            v
                                       clipped PPO
@@ -266,14 +262,14 @@ RL 阶段：
 - `dgppo/algo/module/deep_qp_safety.py`：Graph-HJ 网络、联合方向导数、Deep-QP loss、checkpoint。
 - `dgppo/trainer/safety_buffer.py`：离线 HJ replay。
 - `train_safety_filter.py`：独立 off-policy critic 预训练。
-- `dgppo/algo/informarl_deep_qp.py`：冻结 critic 的 CRPO PPO 更新。
+- `dgppo/algo/informarl_deep_qp.py`：冻结 critic 的 DGPPO 风格混合 PPO 更新。
 - `tests/test_deep_qp_safety.py`：约束、联合系数、HJ update、标准 rollout 语义测试。
 
 ## 9. 当前仍然存在的问题
 
 ### 9.1 没有运行时硬安全保证
 
-CRPO 更新改善的是采样分布上的期望安全，不会像可行 CBF-QP 那样逐步拒绝危险动作。测试时仍可能违反约束。
+混合 PPO 更新改善的是采样分布上的期望安全，不会像可行 CBF-QP 那样逐步拒绝危险动作。测试时仍可能违反约束。
 
 ### 9.2 学习值函数不自动获得严格 CBF 性质
 
@@ -294,7 +290,7 @@ $$
 
 ### 9.3 联合可行性没有被直接检查
 
-多个局部 HJ 约束可能冲突。CRPO 使用 soft policy update 绕开在线联合 QP，但没有证明存在一个联合动作同时满足全部约束。后续应增加仅用于离线诊断的 centralized joint-QP feasibility oracle。
+多个局部 HJ 约束可能冲突。DGPPO 风格的 soft policy update 绕开在线联合 QP，但没有证明存在一个联合动作同时满足全部约束。后续应增加仅用于离线诊断的 centralized joint-QP feasibility oracle。
 
 ### 9.4 HJ 分解的可辨识性
 
@@ -304,9 +300,9 @@ $$
 
 通信边出现或消失会让输入图和 action mask 离散变化。局部图未必是闭合的 Markov 状态，邻居刚进入感知范围时尤其明显。当前实现保证的是结构一致性，不是 HJ 收敛定理。
 
-### 9.6 CRPO 信号是 batch 估计
+### 9.6 混合更新的尺度敏感性
 
-阈值附近会发生 task/safety 模式振荡，且罕见严重违反可能被 batch mean 稀释。应通过 `hj_crpo/safety_update`、`violation_max` 和 `constraint_estimate` 联合监控，并在实验中比较 mean、CVaR 或带滞回的切换规则。
+HJ violation 没有像 task advantage 一样标准化，因此更新强度直接依赖 critic residual 的标度和 `cbf_weight`。应联合监控 `hj_crpo/safe_data`、`hj_crpo/cbf_weight`、`violation_max` 和 `constraint_estimate`，并对 CBF 权重做消融。
 
 ### 9.7 checkpoint 不向后兼容旧方向导数头
 
@@ -318,6 +314,6 @@ $$
 2. 小 replay 上确认 HJ loss、梯度、target update 有限。
 3. held-out transition 检查预测导数与有限差分导数误差。
 4. 固定 actor rollout，对比 HJ violation 与 VMAS 原生 cost 的 precision、recall。
-5. 短程训练确认 task/safety 两种 CRPO 分支都能触发。
+5. 短程训练确认安全样本保留 task advantage，不安全样本只产生 HJ 修复项。
 6. 与 InforMARL、DGPPO 比较 return、unsafe rate、最大违反和训练稳定性。
 7. 最后再增加 centralized joint-QP oracle，量化局部约束冲突率。
