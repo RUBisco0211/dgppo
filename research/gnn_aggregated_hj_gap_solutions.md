@@ -2,13 +2,13 @@
 
 更新时间：2026-08-31
 
-本文合并 GNN 聚合下的 Deep-QP gap、HJB-GNN 的结构启发和 GCBF+ 的局部到全局证书理论。它是理论背景与备选修复路线，不是当前 `informarl_hj_crpo` 实现规格；当前方案以 [统一设计文档](informarl_hj_crpo_design.md) 为准。
+本文合并 GNN 聚合下的 Deep-QP gap、HJB-GNN 的结构启发和 GCBF+ 的局部到全局证书理论。它是理论背景与备选修复路线，不是当前实现规格；当前方案以 [统一设计文档](deepqp_marl_design.md) 为准。
 
 ## 1. 结论
 
 可以继续使用 GNN 对每个智能体的整个局部邻域进行信息聚合，并输出 node-wise HJ Safety Value。问题从来不在“使用 GNN”，而在于值函数的状态依赖、方向导数的动作依赖和执行时可用信息必须一致。
 
-旧 ego-only 原型遗漏邻居动作，造成 derivative target 混叠。当前实现已经保留整邻域标量，并用 local-joint-action pair head、完整 replay joint action 和独立 off-policy 训练修复了这一层结构 gap；RL 阶段冻结 critic，通过 soft HJ-CRPO 更新 actor，不执行 runtime QP。
+旧 ego-only 原型遗漏邻居动作，造成 derivative target 混叠。当前实现已经保留整邻域标量，并用 local-joint-action pair head、完整 replay joint action 和独立 off-policy 训练修复了这一层结构 gap；RL 阶段冻结 critic，通过 DGPPO 式逐样本 HJ advantage 混合更新 actor，不执行 runtime QP。
 
 仍需处理的主要问题是：
 
@@ -67,7 +67,7 @@ $$
 
 此时标量项 `d_i(G_i)` 会混合邻居策略的条件均值、动作噪声和真正的 drift。它可能在固定训练策略下得到较小的经验误差，但不能再解释为只关于 `G_i` 和 `u_i` 的确定性控制仿射方向导数；更换 RL policy 或进入密集交互区后，这个条件分布还会漂移。
 
-当前 `GraphHJSafetyCritic` 已完成第一层结构修复：使用共享 pair head 输出置换等变的局部 joint-action coefficient，并在 HJ loss 中使用完整 replay joint action。当前 RL 阶段没有恢复独立 local QP，而是冻结该 critic，通过 DGPPO 风格的 soft HJ-CRPO advantage 更新策略。因此，本节描述的是修复动机；仍未解决的是局部 Markov 性、动态图边界、函数逼近误差、联合可行性和形式证书。
+当前 `GraphHJSafetyCritic` 已完成第一层结构修复：使用共享 pair head 输出置换等变的局部 joint-action coefficient，并在 HJ loss 中使用完整 replay joint action。当前 RL 阶段没有恢复独立 local QP，而是冻结该 critic，通过 DGPPO 式逐样本 HJ advantage 混合更新策略。因此，本节描述的是修复动机；仍未解决的是局部 Markov 性、动态图边界、函数逼近误差、联合可行性和形式证书。
 
 ## 3. HJB-GNN 能提供什么证据
 
@@ -288,7 +288,7 @@ a_{ii}^\top u_i
 -\alpha\!\left(V_i-m\right).
 $$
 
-因此若恢复 runtime filter，只需引入一个 ego box + half-space projector。与当前 soft HJ-CRPO 实现不同，robust 路线中的 `d_i` 和 `a_ii` 必须在包含邻居动作系数的 max-min HJ 参数化下学习，不能把邻居动作影响重新当成不可辨识噪声。
+因此若恢复 runtime filter，只需引入一个 ego box + half-space projector。与当前 DGPPO 式 HJ advantage 混合实现不同，robust 路线中的 `d_i` 和 `a_ii` 必须在包含邻居动作系数的 max-min HJ 参数化下学习，不能把邻居动作影响重新当成不可辨识噪声。
 
 需要强调：不能只在推理时给当前 QP 加一个 worst-case margin，却继续用 cooperative 或只含 ego action 的 Bellman/HJ target。这样训练的 Value 仍对应另一个控制问题。robust 消元必须与训练时的 max-min 算子和方向导数参数化一起修改。
 
@@ -389,7 +389,7 @@ $$
 | 邻居 nominal action exchange | 需要一次通信 | 对交换动作条件化 | 同步动作与过滤后动作不一致 |
 | 将 joint/robust QP 蒸馏成 GNN policy | 是，且无在线 QP | 经验继承 teacher | 蒸馏误差破坏 hard certificate |
 
-如果研究目标是恢复显式且独立的 local QP，优先考虑 robust neighbor elimination，因为它同时满足：不改 reward、不依赖解析动力学、保留 GNN 高阶邻域建模、RL 训练继续 CTDE、执行时每个智能体只解自己的局部 QP。当前工程选择的是表格之外的 soft HJ-CRPO 路线：它保持 CTDE 和分布式 actor 执行，但不求解 runtime QP，也不提供逐步硬安全保证。
+如果研究目标是恢复显式且独立的 local QP，优先考虑 robust neighbor elimination，因为它同时满足：不改 reward、不依赖解析动力学、保留 GNN 高阶邻域建模、RL 训练继续 CTDE、执行时每个智能体只解自己的局部 QP。当前工程选择的是表格之外的 DGPPO 式逐样本 HJ advantage 混合路线：它保持 CTDE 和分布式 actor 执行，但不求解 runtime QP，也不提供逐步硬安全保证。
 
 HJB-GNN 的 policy imitation 可以作为后续加速方案：用本文的数据驱动 joint/robust QP 生成 teacher action，再训练本地 GNN safety correction policy。但它应当是可选部署后端，不应替代第一阶段对 QP certificate 的验证。
 

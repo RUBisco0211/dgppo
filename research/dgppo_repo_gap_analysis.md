@@ -206,7 +206,7 @@ stochastic test wrapper 的旧签名问题已经修正为 `Algorithm.step(graph,
 
 ### 6.5 缺少自动化测试
 
-仓库目前已有 Deep-QP/HJ-CRPO 单元测试，但仍缺少原始 DGPPO 和 manifold 分支的系统 regression test 与 CI。至少应补：
+仓库目前已有 Deep-QP/Graph-HJ 混合更新单元测试，但仍缺少原始 DGPPO 和 manifold 分支的系统 regression test 与 CI。至少应补：
 
 - DCBF/GAE target 的小型解析测试；
 - graph neighborhood enter/leave 与 permutation/variable-N 测试；

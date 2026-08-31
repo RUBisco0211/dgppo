@@ -16,6 +16,16 @@
 - HJ critic 在 PPO 前单独用 off-policy 探索数据训练；PPO 阶段冻结。
 - 不在 actor 执行路径中求解 QP。
 
+### 1.1 为什么不能称为 CRPO
+
+经典 CRPO 在一次迭代或一个 batch 的整体约束满足时优化 reward objective，约束违反时切换到某个 cost objective。当前方法没有这种 iteration-level/batch-level objective switch，也没有用约束阈值决定整批数据只做任务更新还是只做安全更新。
+
+当前方法在同一个 PPO batch 内，对每个 agent、每个时间步分别构造一个混合 advantage：安全样本保留 task advantage，不安全样本用 HJ violation 替换任务项，然后统一进入同一个 clipped PPO objective。因此准确名称是：
+
+> **Graph-HJ critic + DGPPO-style per-sample task/safety advantage mixing**
+
+下文简称“Graph-HJ 混合更新”或“HJ-DGPPO 式更新”。`informarl_hj_crpo`、`InforMARLHJCRPO` 和 `hj_crpo/*` 只是当前代码中的历史兼容标识，不代表算法属于 CRPO；正式实验、图表和论文表述都不应把本方法写成 CRPO。
+
 ## 2. 为什么旧的逐智能体 QP 路径需要移除
 
 旧原型让每个局部值函数只输出 ego 动作的方向导数系数，然后独立投影 ego 动作。若局部值函数聚合了邻居状态，它通常也依赖邻居动作。真实的局部导数应写成：
@@ -167,7 +177,7 @@ $$
 
 这个归因步骤只在 centralized training 使用。执行时 actor 不需要其他智能体动作。
 
-## 6. DGPPO 风格的混合策略更新
+## 6. DGPPO 式逐样本 advantage 混合
 
 任务 advantage 继续使用 InforMARL 的 reward critic 和 GAE，记为：
 
@@ -213,9 +223,9 @@ w_0,
 \end{cases}
 $$
 
-混合后的 advantage 进入原有 clipped PPO objective。task value critic 始终更新；HJ critic 在 RL 阶段始终冻结。与上一版 batch-level CRPO switch 不同，这里没有全局阈值，也不会让整个 batch 在 task update 和 safety update 之间二选一。
+混合后的 advantage 进入原有 clipped PPO objective。task value critic 始终更新；HJ critic 在 RL 阶段始终冻结。这里没有 CRPO 的全局约束阈值或 batch-level objective switch，也不会让整个 batch 在 task update 和 safety update 之间二选一。
 
-训练命令示例：
+若已有预训练 checkpoint，第二阶段底层代码入口为：
 
 ```bash
 python train.py \
@@ -225,7 +235,7 @@ python train.py \
   --hj-cbf-alpha 1.0 --cbf-weight 1.0
 ```
 
-`informarl_deep_qp` 暂时保留为同一实现的兼容别名，新实验应使用 `informarl_hj_crpo`。
+这里的 `informarl_hj_crpo` 和 `informarl_deep_qp` 都只是第二阶段实现的兼容标识。完整新实验应使用 `--algo deepqp`；方法名称使用“Graph-HJ 混合更新”，而不是 CRPO。
 
 ## 7. CTDE 数据流
 
@@ -273,7 +283,7 @@ python train.py --env LidarSpread --algo deepqp -n 3 --obs 3
 1. 创建统一实验目录、W&B run ID 和本地 metrics 文件；
 2. 使用 off-policy replay 预训练 Graph-HJ critic；
 3. 保存并冻结 `deep_qp_safety.pkl`；
-4. 以 `informarl_hj_crpo` 实现启动第二阶段 PPO 训练。
+4. 调用历史代码标识 `informarl_hj_crpo` 所对应的 Graph-HJ 混合更新实现，启动第二阶段 PPO 训练。
 
 `--steps` 表示第二阶段 PPO 训练步数，第一阶段使用独立的 `--deep-qp-pretrain-steps`。无需 shell 包装器，也无需手工传递两个阶段之间的 checkpoint。
 
@@ -319,13 +329,13 @@ logs/<env>/deepqp/seed<seed>_<timestamp>_<id>/
 - replay size、constraint mean/min、unsafe sample rate；
 - 固定 validation transitions 上的 `deep-qp/eval/safety/*` 指标。
 
-第二阶段记录 reward/cost、unsafe rate、actor/value loss、entropy、clip fraction、HJ residual、violation、CBF weight、吞吐与耗时，并周期性生成 deterministic eval 视频。主 W&B 横轴为 `counters/total_frames`。没有 FFmpeg 时视频降级为 GIF；渲染失败不会阻止 scalar 日志或 checkpoint 保存。
+第二阶段记录 reward/cost、unsafe rate、actor/value loss、entropy、clip fraction、HJ residual、violation、CBF weight、吞吐与耗时，并周期性生成 deterministic eval 视频。当前 `hj_crpo/*` 只是尚未迁移的历史指标命名空间，不表示使用 CRPO。主 W&B 横轴为 `counters/total_frames`。没有 FFmpeg 时视频降级为 GIF；渲染失败不会阻止 scalar 日志或 checkpoint 保存。
 
 第一阶段没有策略视频，因为该阶段只训练值函数。固定验证集只能检查经验误差和数值退化，不能替代连续状态空间上的前向不变性证明。
 
 ### 8.4 手工分阶段与恢复
 
-正常训练应使用 `--algo deepqp`。如果已经有单独训练的 HJ checkpoint，可直接启动第二阶段：
+正常训练应使用 `--algo deepqp`。如果已经有单独训练的 HJ checkpoint，可通过历史代码标识直接启动第二阶段：
 
 ```bash
 python train.py --env LidarSpread --algo informarl_hj_crpo -n 3 --obs 3 \
@@ -340,7 +350,7 @@ python train.py --env LidarSpread --algo informarl_hj_crpo -n 3 --obs 3 \
 - `dgppo/algo/module/deep_qp_safety.py`：Graph-HJ 网络、联合方向导数、Deep-QP loss、checkpoint。
 - `dgppo/trainer/safety_buffer.py`：离线 HJ replay。
 - `train_safety_filter.py`：独立 off-policy critic 预训练。
-- `dgppo/algo/informarl_deep_qp.py`：冻结 critic 的 DGPPO 风格混合 PPO 更新。
+- `dgppo/algo/informarl_deep_qp.py`：冻结 critic 的 DGPPO 式逐样本混合 PPO 更新；文件中的 CRPO 类名和指标前缀是历史命名。
 - `tests/test_deep_qp_safety.py`：约束、联合系数、HJ update、标准 rollout 语义测试。
 - `tests/test_informarl_hj_crpo.py`：advantage 混合、动作责任归因以及 VMAS/LidarEnv rollout/update 测试。
 
@@ -371,7 +381,7 @@ python train.py --env LidarSpread --algo deepqp -n 2 --obs 1 \
 - `dgppo`、`informarl_lagr` 和 `hcbfcrpo` 的算法实现文件没有修改，其 rollout、CBF/cost advantage、loss 和更新公式保持不变。
 - `informarl` 的 PPO rollout、reward GAE、clipped objective 和参数更新没有修改；仅 `save/load` 增加了优化器、训练步数和 PRNG 状态保存。
 - `informarl_manifold` 继承 `informarl`，因此核心更新不变，但同样继承新的 checkpoint 行为。
-- `informarl_hj_crpo` 和兼容别名 `informarl_deep_qp` 才会实例化冻结的 Graph-HJ critic，并执行第 5、6 节的安全 residual 和混合 advantage。
+- 历史代码标识 `informarl_hj_crpo` 和 `informarl_deep_qp` 才会实例化冻结的 Graph-HJ critic，并执行第 5、6 节的安全 residual 和混合 advantage；这不表示方法采用 CRPO。
 - `deepqp` 只是在 `train.py` 中顺序调度两个阶段的组合入口；其他 `--algo` 值仍直接进入原有 RL 训练分支。
 - 新增的 `SafetyBatch`、safety replay、连续约束适配器和 Graph-HJ 网络不会进入其他算法的 update 路径。原有环境的 reward、cost 和 dynamics 文件也没有被修改。
 
@@ -379,7 +389,7 @@ python train.py --env LidarSpread --algo deepqp -n 2 --obs 1 \
 
 `test.py --stochastic` 的 actor 调用签名也被修正为当前 `Algorithm.step(graph, rnn_state, key)` 接口；deterministic evaluation 路径不变。
 
-当前已有测试覆盖 Deep-QP/HJ-CRPO 的关键路径；本次兼容性审计也验证了原有四个算法仍可由 factory 正常构造。尚未建立从上述 commit 出发、对原算法完整训练轨迹做逐参数 bitwise 对比的回归测试。因此这里能确认的是“核心公式和代码路径未修改”，而不是跨硬件、跨 JAX 版本的逐位一致性保证。
+当前已有测试覆盖 Deep-QP/Graph-HJ 混合更新的关键路径；本次兼容性审计也验证了原有四个算法仍可由 factory 正常构造。尚未建立从上述 commit 出发、对原算法完整训练轨迹做逐参数 bitwise 对比的回归测试。因此这里能确认的是“核心公式和代码路径未修改”，而不是跨硬件、跨 JAX 版本的逐位一致性保证。
 
 ## 10. 当前仍然存在的问题
 
@@ -418,7 +428,7 @@ $$
 
 ### 10.6 混合更新的尺度敏感性
 
-HJ violation 没有像 task advantage 一样标准化，因此更新强度直接依赖 critic residual 的标度和 `cbf_weight`。应联合监控 `hj_crpo/safe_data`、`hj_crpo/cbf_weight`、`violation_max` 和 `constraint_estimate`，并对 CBF 权重做消融。
+HJ violation 没有像 task advantage 一样标准化，因此更新强度直接依赖 critic residual 的标度和 `cbf_weight`。应联合监控历史命名空间中的 `hj_crpo/safe_data`、`hj_crpo/cbf_weight`、`violation_max` 和 `constraint_estimate`，并对 CBF 权重做消融。
 
 ### 10.7 checkpoint 不向后兼容旧方向导数头
 
