@@ -125,7 +125,7 @@ We provide the following algorithms:
 - `informarl`: [MAPPO](https://github.com/marlbenchmark/on-policy) with GNN ([Scalable Multi-Agent Reinforcement Learning through Intelligent Information Aggregation](https://github.com/nsidn98/InforMARL/)).
 - `informarl_lagr`: [MAPPO-Lagrangian](https://github.com/chauncygu/Multi-Agent-Constrained-Policy-Optimisation) with GNN. Replaced the sum-over-time cost with max-over-time cost.
 - `deepqp`: Two-stage entry point that first pretrains the distributed Graph-HJ critic, then freezes it and runs `informarl_hj_crpo`.
-- `informarl_hj_crpo`: InforMARL with a separately trained distributed Graph-HJ critic and DGPPO-style per-sample task/safety advantage mixing. It does not apply a runtime QP. See [the integration design](research/informarl_hj_crpo_design.md).
+- `informarl_hj_crpo`: InforMARL with a separately trained distributed Graph-HJ critic and DGPPO-style per-sample task/safety advantage mixing. It does not apply a runtime QP. See the [unified Deep-QP design and training document](research/informarl_hj_crpo_design.md).
 - `hcbfcrpo`: DGPPO but replace the learned GCBF with a hand-crafted CBF.
 
 ## Usage
@@ -146,10 +146,12 @@ python train.py --env LidarSpread --algo deepqp -n 3 --obs 3
 
 `deepqp` creates one experiment root, runs the two stages sequentially, reuses one
 W&B run, and appends both stages to one local metrics file. Its HJ pretraining
-parameters use the `--deep-qp-pretrain-*` flags; existing `train.py` defaults for
-other algorithms are unchanged. A separately pretrained checkpoint can still be
-used directly with `--algo informarl_hj_crpo --deep-qp-checkpoint <path>`. For
-details, see the [two-stage training guide](research/two_stage_training_guide.md).
+parameters use the `--deep-qp-pretrain-*` flags and do not override the original
+algorithms' optimization hyperparameters or update rules. Shared logging,
+checkpoint, and W&B behavior has been enhanced for every algorithm. A separately
+pretrained checkpoint can still be used directly with
+`--algo informarl_hj_crpo --deep-qp-checkpoint <path>`. For details, see the
+[unified Deep-QP design and training document](research/informarl_hj_crpo_design.md).
 
 The training logs will be saved in `logs/<env>/<algo>/seed<seed>_<timestamp>_<four random letters>`. We provide the following flags:
 

@@ -1,4 +1,6 @@
-# InforMARL + Graph-HJ + DGPPO 混合更新设计
+# Deep-QP in MARL 当前方案与训练指南
+
+本文是当前实现的唯一方案入口，统一记录理论设计、代码边界、训练命令、日志和已知问题。`research/` 中其余文档仅作为背景调研，不作为当前实现或运行流程的规格。
 
 ## 1. 结论与定位
 
@@ -8,9 +10,9 @@
 
 本实现采用以下边界：
 
-- 只支持 `VMASNavigation` 和 `VMASNavigationObs`。
+- 支持 LidarEnv，以及 `VMASNavigation` 和 `VMASNavigationObs`。
 - 不调用环境显式动力学函数。
-- 不修改 VMAS reward、cost 或 step 动力学。
+- 不修改 LidarEnv/VMAS 的 reward、cost 或 step 动力学；连续安全约束只读取图观测。
 - HJ critic 在 PPO 前单独用 off-policy 探索数据训练；PPO 阶段冻结。
 - 不在 actor 执行路径中求解 QP。
 
@@ -125,12 +127,12 @@ $$
 
 采样动作覆盖完整联合动作空间。replay 对安全边界附近及不安全样本做优先采样。预训练过程不读取 task reward，也不执行当前 critic 导出的 QP 或策略，避免 collector 与 critic 共同形成自举过滤闭环。
 
-训练命令示例：
+完整两阶段训练使用第 8 节的 `--algo deepqp` 入口。若只需单独预训练 safety critic，可使用底层入口：
 
 ```bash
 python train_safety_filter.py \
-  --env VMASNavigationObs -n 3 --obs 3 \
-  --output-dir ./logs/deep_qp_safety/vmas_navigation_obs
+  --env LidarSpread -n 3 --obs 3 \
+  --output-dir ./logs/deep_qp_safety/lidar_spread
 ```
 
 ## 5. RL 阶段的 CBF 残差
@@ -256,7 +258,83 @@ RL 阶段：
 局部图 -> 共享 actor -> 本智能体动作
 ```
 
-## 8. 代码组织
+## 8. 训练入口、参数与日志
+
+### 8.1 一条命令完成两阶段训练
+
+LidarEnv 上的推荐命令为：
+
+```bash
+python train.py --env LidarSpread --algo deepqp -n 3 --obs 3
+```
+
+`deepqp` 是组合训练入口，会顺序执行：
+
+1. 创建统一实验目录、W&B run ID 和本地 metrics 文件；
+2. 使用 off-policy replay 预训练 Graph-HJ critic；
+3. 保存并冻结 `deep_qp_safety.pkl`；
+4. 以 `informarl_hj_crpo` 实现启动第二阶段 PPO 训练。
+
+`--steps` 表示第二阶段 PPO 训练步数，第一阶段使用独立的 `--deep-qp-pretrain-steps`。无需 shell 包装器，也无需手工传递两个阶段之间的 checkpoint。
+
+### 8.2 参数组织
+
+以下参数会同时传给两个阶段，必须保持一致：
+
+- `--deep-qp-gnn-layers`
+- `--deep-qp-gnn-out-dim`
+- `--deep-qp-hidden-dim`
+- `--deep-qp-hidden-layers`
+- `--deep-qp-lambda-init`
+- `--deep-qp-lambda-final`
+- `--deep-qp-lambda-decay-steps`
+- `--deep-qp-constraint-scale`
+- `--deep-qp-agent-margin`
+- `--deep-qp-obstacle-margin`
+
+第一阶段的采样与优化参数使用 `--deep-qp-pretrain-*` 参数组，包括 environment 数、rollout 长度、warmup、batch size、replay size、更新次数以及保存/评估间隔。
+
+第二阶段继续使用 `--steps`、`--n-env-train`、`--batch-size`、`--hj-cbf-alpha`、`--hj-cbf-margin`、`--hj-cbf-eps` 和 `--cbf-weight` 等原有 RL 参数。组合入口不会覆盖其他算法的优化超参数。
+
+### 8.3 输出目录与统一日志
+
+```text
+logs/<env>/deepqp/seed<seed>_<timestamp>_<id>/
+├── training_metrics.jsonl
+├── wandb_run_id
+├── deep-qp/
+│   ├── deep_qp_safety.pkl
+│   ├── deep_qp_replay.pkl
+│   └── deep_qp_training_state.pkl
+└── rl/<env>/informarl_hj_crpo/<run>/
+    ├── config.yaml
+    ├── models/latest/
+    └── videos/latest_eval.mp4
+```
+
+两个阶段共同追加根目录的 `training_metrics.jsonl`，并复用同一个 W&B project、run ID 和 run name。第一阶段指标全部位于 `deep-qp/*` 命名空间，主要包括：
+
+- value、derivative、coefficient 和 scalar 分项 loss；
+- derivative residual、value bound violation、coefficient norm 和 gradient norm；
+- replay size、constraint mean/min、unsafe sample rate；
+- 固定 validation transitions 上的 `deep-qp/eval/safety/*` 指标。
+
+第二阶段记录 reward/cost、unsafe rate、actor/value loss、entropy、clip fraction、HJ residual、violation、CBF weight、吞吐与耗时，并周期性生成 deterministic eval 视频。主 W&B 横轴为 `counters/total_frames`。没有 FFmpeg 时视频降级为 GIF；渲染失败不会阻止 scalar 日志或 checkpoint 保存。
+
+第一阶段没有策略视频，因为该阶段只训练值函数。固定验证集只能检查经验误差和数值退化，不能替代连续状态空间上的前向不变性证明。
+
+### 8.4 手工分阶段与恢复
+
+正常训练应使用 `--algo deepqp`。如果已经有单独训练的 HJ checkpoint，可直接启动第二阶段：
+
+```bash
+python train.py --env LidarSpread --algo informarl_hj_crpo -n 3 --obs 3 \
+  --deep-qp-checkpoint ./logs/deep_qp_safety/lidar_spread/deep_qp_safety.pkl
+```
+
+`--algo deepqp` 当前只负责 fresh two-stage training，不接受 `--resume-dir`。第一阶段恢复使用 `train_safety_filter.py --resume <checkpoint>`；第二阶段恢复使用 `--algo informarl_hj_crpo --resume-dir <run>`。
+
+### 8.5 代码组织
 
 - `dgppo/env/safety_constraint.py`：只读图状态的连续安全 margin。
 - `dgppo/algo/module/deep_qp_safety.py`：Graph-HJ 网络、联合方向导数、Deep-QP loss、checkpoint。
@@ -264,14 +342,52 @@ RL 阶段：
 - `train_safety_filter.py`：独立 off-policy critic 预训练。
 - `dgppo/algo/informarl_deep_qp.py`：冻结 critic 的 DGPPO 风格混合 PPO 更新。
 - `tests/test_deep_qp_safety.py`：约束、联合系数、HJ update、标准 rollout 语义测试。
+- `tests/test_informarl_hj_crpo.py`：advantage 混合、动作责任归因以及 VMAS/LidarEnv rollout/update 测试。
 
-## 9. 当前仍然存在的问题
+### 8.6 最小端到端检查
 
-### 9.1 没有运行时硬安全保证
+下面的命令只用于验证阶段切换、checkpoint 传递和日志，不代表正式训练配置：
+
+```bash
+python train.py --env LidarSpread --algo deepqp -n 2 --obs 1 \
+  --deep-qp-pretrain-steps 1 --deep-qp-pretrain-n-env 1 \
+  --deep-qp-pretrain-rollout-steps 2 \
+  --deep-qp-pretrain-updates-per-collect 1 \
+  --deep-qp-pretrain-warmup 1 --deep-qp-pretrain-batch-size 1 \
+  --deep-qp-pretrain-replay-size 4 --deep-qp-pretrain-save-interval 1 \
+  --deep-qp-pretrain-log-interval 1 --deep-qp-pretrain-eval-interval 1 \
+  --deep-qp-pretrain-eval-n-env 1 --deep-qp-gnn-out-dim 8 \
+  --deep-qp-hidden-dim 16 --deep-qp-hidden-layers 1 --steps 0 \
+  --n-env-train 1 --n-env-test 1 --batch-size 128 \
+  --no-rnn --no-video --wandb-mode disabled --log-dir /tmp/deepqp-smoke
+```
+
+## 9. 与原有算法的兼容性边界
+
+这里把“核心算法流程”和“训练外围设施”分开定义。核心算法流程包括 rollout 采样语义、advantage 计算、loss、梯度计算和参数更新；日志、视频、checkpoint 文件组织和 W&B 连接方式不属于核心算法流程。
+
+从 commit `42a1b59aee784385b331a025280a2cd19721d812` 到当前实现，兼容性结论如下：
+
+- `dgppo`、`informarl_lagr` 和 `hcbfcrpo` 的算法实现文件没有修改，其 rollout、CBF/cost advantage、loss 和更新公式保持不变。
+- `informarl` 的 PPO rollout、reward GAE、clipped objective 和参数更新没有修改；仅 `save/load` 增加了优化器、训练步数和 PRNG 状态保存。
+- `informarl_manifold` 继承 `informarl`，因此核心更新不变，但同样继承新的 checkpoint 行为。
+- `informarl_hj_crpo` 和兼容别名 `informarl_deep_qp` 才会实例化冻结的 Graph-HJ critic，并执行第 5、6 节的安全 residual 和混合 advantage。
+- `deepqp` 只是在 `train.py` 中顺序调度两个阶段的组合入口；其他 `--algo` 值仍直接进入原有 RL 训练分支。
+- 新增的 `SafetyBatch`、safety replay、连续约束适配器和 Graph-HJ 网络不会进入其他算法的 update 路径。原有环境的 reward、cost 和 dynamics 文件也没有被修改。
+
+共享 `Trainer` 存在外围行为变化，适用于所有算法：增加本地 JSONL 指标、W&B mode/run ID、计时指标、视频失败容错、训练状态 sidecar 和循环结束后的最终 checkpoint。联网检测也从固定返回在线改为真实探测。这些变化不参与 loss 或梯度计算，因此不会改变 fresh training 的数值更新规则，但会改变日志、checkpoint 内容和部分续训语义。当前 `counters/stage=2` 是 Trainer 的统一日志标签，普通算法出现该字段不表示它执行了 Deep-QP 第二阶段。
+
+`test.py --stochastic` 的 actor 调用签名也被修正为当前 `Algorithm.step(graph, rnn_state, key)` 接口；deterministic evaluation 路径不变。
+
+当前已有测试覆盖 Deep-QP/HJ-CRPO 的关键路径；本次兼容性审计也验证了原有四个算法仍可由 factory 正常构造。尚未建立从上述 commit 出发、对原算法完整训练轨迹做逐参数 bitwise 对比的回归测试。因此这里能确认的是“核心公式和代码路径未修改”，而不是跨硬件、跨 JAX 版本的逐位一致性保证。
+
+## 10. 当前仍然存在的问题
+
+### 10.1 没有运行时硬安全保证
 
 混合 PPO 更新改善的是采样分布上的期望安全，不会像可行 CBF-QP 那样逐步拒绝危险动作。测试时仍可能违反约束。
 
-### 9.2 学习值函数不自动获得严格 CBF 性质
+### 10.2 学习值函数不自动获得严格 CBF 性质
 
 有限 replay、函数逼近误差和优化误差意味着 HJ residual 只在训练分布上近似成立。当前没有对整个连续状态空间验证：
 
@@ -288,27 +404,27 @@ $$
 
 因此不能声称已证明前向不变性。
 
-### 9.3 联合可行性没有被直接检查
+### 10.3 联合可行性没有被直接检查
 
 多个局部 HJ 约束可能冲突。DGPPO 风格的 soft policy update 绕开在线联合 QP，但没有证明存在一个联合动作同时满足全部约束。后续应增加仅用于离线诊断的 centralized joint-QP feasibility oracle。
 
-### 9.4 HJ 分解的可辨识性
+### 10.4 HJ 分解的可辨识性
 
 标量项和动作系数项只通过 transition 导数监督，可能存在互相补偿。需要监控 coefficient norm、derivative residual，并用充分激励的联合动作采样和 held-out action counterfactual 检验方向导数。
 
-### 9.5 动态拓扑和局部 Markov gap
+### 10.5 动态拓扑和局部 Markov gap
 
 通信边出现或消失会让输入图和 action mask 离散变化。局部图未必是闭合的 Markov 状态，邻居刚进入感知范围时尤其明显。当前实现保证的是结构一致性，不是 HJ 收敛定理。
 
-### 9.6 混合更新的尺度敏感性
+### 10.6 混合更新的尺度敏感性
 
 HJ violation 没有像 task advantage 一样标准化，因此更新强度直接依赖 critic residual 的标度和 `cbf_weight`。应联合监控 `hj_crpo/safe_data`、`hj_crpo/cbf_weight`、`violation_max` 和 `constraint_estimate`，并对 CBF 权重做消融。
 
-### 9.7 checkpoint 不向后兼容旧方向导数头
+### 10.7 checkpoint 不向后兼容旧方向导数头
 
 旧原型的系数形状为每个 agent 一个自身动作向量，新实现是共享 pair head。旧 checkpoint 无法安全迁移，必须重新预训练。
 
-## 10. 最小验证顺序
+## 11. 最小验证顺序
 
 1. 单步测试联合系数 shape、邻接 mask、goal 特征不变性。
 2. 小 replay 上确认 HJ loss、梯度、target update 有限。
