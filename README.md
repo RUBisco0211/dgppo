@@ -140,11 +140,15 @@ python train.py --env <env> --algo <algo> -n <n_agent> --obs <n_obs>
 `informarl_hj_crpo` requires a pretrained Graph-HJ critic for a new PPO run:
 
 ```bash
-python train_safety_filter.py --env VMASNavigationObs -n 3 --obs 3 \
-  --output-dir ./logs/deep_qp_safety/vmas_navigation_obs
-python train.py --env VMASNavigationObs --algo informarl_hj_crpo -n 3 --obs 3 --no-rnn \
-  --deep-qp-checkpoint ./logs/deep_qp_safety/vmas_navigation_obs/deep_qp_safety.pkl
+python train_safety_filter.py --env LidarTarget -n 3 --obs 3 \
+  --output-dir ./logs/deep_qp_safety/lidar_target
+python train.py --env LidarTarget --algo informarl_hj_crpo -n 3 --obs 3 --no-rnn \
+  --deep-qp-checkpoint ./logs/deep_qp_safety/lidar_target/deep_qp_safety.pkl
 ```
+
+For a configurable server-ready command that runs both stages with aligned
+network and safety-constraint settings, see the
+[two-stage training guide](research/two_stage_training_guide.md).
 
 The training logs will be saved in `logs/<env>/<algo>/seed<seed>_<timestamp>_<four random letters>`. We provide the following flags:
 
