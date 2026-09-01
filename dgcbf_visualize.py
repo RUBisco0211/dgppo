@@ -13,7 +13,7 @@ grid.  One GIF is written for every selected ego agent.
 
 Example
 -------
-python gcbf_visualize.py \
+python dgcbf_visualize.py \
     --dgppo-dir logs/LidarSpread/dgppo/seed0_707102621_YGIV \
     --cost-channel worst --ego-agents all
 """
