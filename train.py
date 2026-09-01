@@ -92,12 +92,12 @@ def _train_rl(args):
 
     # create algorithm
     if (
-        args.algo in {"informarl_hj_crpo", "informarl_deep_qp"}
+        args.algo == "informarl_deep_qp"
         and args.deep_qp_checkpoint is None
         and args.resume_dir is None
     ):
         raise ValueError(
-            "informarl_hj_crpo requires --deep-qp-checkpoint for a new PPO run. "
+            "informarl_deep_qp requires --deep-qp-checkpoint for a new PPO run. "
             "Pretrain it with train_safety_filter.py."
         )
     algo = make_algo(
@@ -267,7 +267,7 @@ def _train_deepqp(args):
     if args.resume_dir is not None:
         raise ValueError(
             "--algo deepqp starts a fresh two-stage run; use "
-            "--algo informarl_hj_crpo with --resume-dir to resume stage 2"
+            "--algo informarl_deep_qp with --resume-dir to resume stage 2"
         )
 
     if args.wandb_mode == "auto":
@@ -353,7 +353,7 @@ def _train_deepqp(args):
     train_safety_critic(safety_args)
 
     rl_args = copy.deepcopy(args)
-    rl_args.algo = "informarl_hj_crpo"
+    rl_args.algo = "informarl_deep_qp"
     rl_args.deep_qp_checkpoint = str(hj_dir / "deep_qp_safety.pkl")
     rl_args.log_dir = str(rl_log_dir)
     rl_args.metrics_log_file = str(metrics_log_file.resolve())
@@ -411,7 +411,7 @@ def main():
     parser.add_argument("--manifold-slack-weight", type=float, default=10.0)
     parser.add_argument("--manifold-reg", type=float, default=1e-5)
 
-    # pretrained Graph-HJ critic and CRPO arguments
+    # pretrained Graph-HJ critic and Deep-QP policy-training arguments
     parser.add_argument("--deep-qp-checkpoint", type=str, default=None)
     parser.add_argument("--deep-qp-gnn-layers", type=int, default=1)
     parser.add_argument("--deep-qp-gnn-out-dim", type=int, default=64)

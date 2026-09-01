@@ -309,9 +309,148 @@ logs/<env>/deepqp/seed<seed>_<timestamp>_<id>/
 - replay size、constraint mean/min、unsafe sample rate；
 - 固定 validation transitions 上的 `deep-qp/eval/safety/*` 指标。
 
-第二阶段记录 reward/cost、unsafe rate、actor/value loss、entropy、clip fraction、HJ residual、violation、CBF weight、吞吐与耗时，并周期性生成 deterministic eval 视频。主 W&B 横轴为 `counters/total_frames`。没有 FFmpeg 时视频降级为 GIF；渲染失败不会阻止 scalar 日志或 checkpoint 保存。
+第二阶段记录 reward/cost、unsafe rate、actor/value loss、entropy、clip fraction、HJ residual、violation、CBF weight、吞吐与耗时，其中策略训练产生的 HJ 指标统一位于 `deep-qp/policy/*` 命名空间。训练过程周期性生成 deterministic eval 视频，主 W&B 横轴为 `counters/total_frames`。没有 FFmpeg 时视频降级为 GIF；渲染失败不会阻止 scalar 日志或 checkpoint 保存。
 
 第一阶段没有策略视频，因为该阶段只训练值函数。固定验证集只能检查经验误差和数值退化，不能替代连续状态空间上的前向不变性证明。
+
+#### 8.3.1 第一阶段指标使用的量
+
+记 `constraint_scale` 为约束归一化尺度，环境给出的局部安全约束为 `constraint`，网络实际使用的归一化约束为：
+
+$$
+\widetilde c_i=\frac{c_i}{s_c}.
+$$
+
+当前符号约定是 `constraint >= 0` 表示安全，`constraint < 0` 表示已经违反环境安全约束。网络输出两个 value head，并使用二者的较小值作为安全 value：
+
+$$
+V_i=\min\left(V_i^{(1)},V_i^{(2)}\right).
+$$
+
+对局部证书所有者 `i`，联合动作方向导数头输出系数 `a_ij` 和标量项。动作盒约束的 support function 为：
+
+$$
+\sigma_{\mathcal U}(a_i)
+=
+\max_{\mathbf u\in\mathcal U}
+\sum_j a_{ij}^{\mathsf T}u_j.
+$$
+
+代码中的动作相关导数项为：
+
+$$
+q_i(\mathbf u)
+=
+\sum_j a_{ij}^{\mathsf T}u_j
+-
+\sigma_{\mathcal U}(a_i).
+$$
+
+以下第一阶段指标均在最新 replay minibatch 上计算，并写入 `deep-qp/safety/*`：
+
+| 指标 | 含义 | 期望趋势 |
+|---|---|---|
+| `deep-qp/safety/loss` | 实际反向传播的总损失，即 value loss 与 derivative loss 的加权和。 | 下降并稳定；不能单独作为证书有效性的结论。 |
+| `deep-qp/safety/value_loss` | 两个 value head 对固定点/Bellman target 的均方误差之和，并按环境时间步长缩放。 | 下降。 |
+| `deep-qp/safety/derivative_loss` | 结构化方向导数拟合误差，等于 coefficient loss 与 scalar loss 之和。 | 下降。 |
+| `deep-qp/safety/coefficient_loss` | 检查联合动作系数产生的动作项与 target 导数分解是否一致。 | 下降。 |
+| `deep-qp/safety/scalar_loss` | 检查与动作无关的标量导数项是否补足 target 导数。 | 下降。 |
+| `deep-qp/safety/value_bound_violation` | minibatch 中满足 `V > normalized_constraint` 的样本比例。HJ safety value 应不大于瞬时约束，因此该事件表示 value 上界被破坏。 | 越接近 0 越好。 |
+| `deep-qp/safety/value_mean` | minibatch 上安全 value 的均值。它反映当前数据整体离危险边界的相对位置。 | 仅诊断；不能简单认为越大或越小越好。 |
+| `deep-qp/safety/target_online_gap` | online value 与 target value 的平均绝对差。 | 通常应逐渐缩小并保持有限；过大表示 target 跟踪或训练不稳定。 |
+| `deep-qp/safety/derivative_residual` | 预测总方向导数与经验 target 导数之间的平均绝对残差。 | 越小越好，是判断导数头是否学到有效信号的核心指标之一。 |
+| `deep-qp/safety/coefficient_norm` | 联合动作系数张量的平均范数。 | 仅诊断；突然爆炸通常表示导数头不稳定，接近 0 则可能表示动作影响被忽略。 |
+| `deep-qp/safety/lambda` | 当前 contraction/HJ 折扣系数，按配置从初值五次多项式衰减到终值。 | 由 schedule 决定，不是训练质量指标。 |
+| `deep-qp/safety/grad_norm` | safety critic 本次更新的原始全局梯度范数。优化器随后再执行梯度裁剪。 | 应保持有限；持续尖峰需要检查 loss、数据尺度或学习率。 |
+| `deep-qp/safety/has_nan` | 本次 loss 或梯度是否出现非有限值；`1` 表示异常。 | 必须为 0。当前实现检测到 `1` 会停止训练。 |
+| `deep-qp/safety/update_applied` | 本次 safety critic 参数更新是否实际执行；`1` 表示成功。 | 正常训练应为 1。 |
+
+其中总损失关系为：
+
+$$
+L_{\mathrm{safety}}
+=
+w_V L_V+w_D
+\left(L_{\mathrm{coefficient}}+L_{\mathrm{scalar}}\right).
+$$
+
+第一阶段还记录采样、进度和性能指标：
+
+| 指标 | 含义 | 备注 |
+|---|---|---|
+| `deep-qp/counters/update` | 已成功完成的 safety critic 梯度更新次数。 | 第一阶段 W&B 指标的横轴。 |
+| `deep-qp/counters/replay_size` | 当前 replay buffer 中的 transition 数量。 | 达到 warmup 和 batch size 要求后才开始更新。 |
+| `deep-qp/data/constraint_mean` | 最新采集 batch 中原始环境约束的均值。 | 未除以 `constraint_scale`。 |
+| `deep-qp/data/constraint_min` | 最新采集 batch 中最小的原始环境约束。 | 小于 0 表示 batch 内至少存在违反样本。 |
+| `deep-qp/data/unsafe_rate` | 最新采集 batch 中 `constraint < 0` 的元素比例。 | 衡量采样数据中的环境约束违反率。 |
+| `deep-qp/time/elapsed_sec` | 第一阶段从本次启动开始累计的墙钟时间。 | 续训后重新计时。 |
+| `deep-qp/performance/updates_per_sec` | 平均每秒 safety critic 更新次数。 | 用于吞吐诊断。 |
+
+`deep-qp/eval/safety/*` 与 `deep-qp/eval/data/*` 使用相同定义，但始终在启动时固定采集的 validation transitions 上计算。它们比训练 minibatch 指标更适合观察泛化和过拟合。eval loss 不执行反向传播，因此没有 eval 版本的 `grad_norm`、`has_nan` 和 `update_applied`。
+
+#### 8.3.2 第二阶段策略指标
+
+第二阶段冻结第一阶段的 target HJ 网络。对 rollout 中每个局部证书所有者 `i`，代码计算：
+
+$$
+r_i
+=
+\sum_j a_{ij}^{\mathsf T}u_j
+-
+\sigma_{\mathcal U}(a_i)
++
+d_i
++
+\alpha
+\left(
+V_i-\frac{m}{s_c}
+\right),
+$$
+
+其中 `d_i` 是 critic 输出并经过 contraction 修正的最大导数标量项，`m` 对应 `hj_cbf_margin`。当前 safe-positive 符号约定要求：
+
+$$
+r_i\geq\varepsilon.
+$$
+
+因此局部违反量为：
+
+$$
+\ell_i
+=
+\max\left(\varepsilon-r_i,0\right).
+$$
+
+动作所有者 `j` 接收所有显式依赖 `u_j` 的局部证书中最坏的违反量：
+
+$$
+\ell_j^{\mathrm{owner}}
+=
+\max_{i:M_{ij}=1}\ell_i.
+$$
+
+第二阶段新增的 W&B 和本地日志指标如下：
+
+| 指标 | 含义 | 期望趋势 |
+|---|---|---|
+| `deep-qp/policy/constraint_estimate` | 先在每个 rollout 时刻对所有局部证书的违反量取最大值，再对 batch 和时间求均值，即“平均最坏局部 HJ 违反量”。它不是环境 cost。 | 越接近 0 越好。 |
+| `deep-qp/policy/safe_data` | 所有 batch、时间和动作所有者位置中满足 `owner_violation == 0` 的比例。 | 越接近 1 越好。 |
+| `deep-qp/policy/cbf_weight` | 当前混合策略更新中 HJ 违反项的权重。启用 schedule 时会在训练进度达到一半和四分之三时分别增大。 | 由 schedule 决定，不是性能指标。 |
+| `deep-qp/policy/violation_mean` | 所有局部证书违反量的平均值。 | 越接近 0 越好。 |
+| `deep-qp/policy/violation_max` | 当前 PPO rollout 中出现的最大局部证书违反量。 | 越接近 0 越好，用于发现均值掩盖的极端失败。 |
+| `deep-qp/policy/residual_min` | 当前 PPO rollout 中最小的 HJ/CBF residual。 | 越大越安全；低于 `hj_cbf_eps` 表示至少存在违反。 |
+| `deep-qp/policy/value_min` | 当前 PPO rollout 上所有局部 HJ value 的最小值。 | 仅诊断危险边界；更负通常表示存在更危险状态，但必须结合 value 标定和环境 cost 判断。 |
+| `deep-qp/policy/neighborhood_density` | `action_mask` 中 `True` 的比例，即局部证书与联合动作变量之间的平均耦合密度。 | 仅诊断图规模和 credit assignment 复杂度，不是安全率。 |
+
+`train/agents/safe_ratio` 是 `deep-qp/policy/safe_data` 的通用训练面板别名，两者数值相同。策略指标来自用于 PPO 更新的训练 rollout；当前 deterministic eval 仍以环境 reward、cost 和 unsafe rate 为主，并不会重新命名成 `deep-qp/policy/*`。
+
+#### 8.3.3 指标解释边界
+
+- `deep-qp/data/unsafe_rate` 使用环境约束 `constraint < 0` 定义；`deep-qp/policy/safe_data` 使用学习到的 HJ residual 定义。二者既不是同一个标签，也不是严格互补量。
+- loss 下降只能说明网络更好地拟合当前 replay/validation target，不能单独证明学习到的 value 满足连续状态空间上的 CBF 条件。
+- `safe_data` 接近 1 只说明当前训练 rollout 上网络判断 residual 满足阈值；仍需结合环境 `eval/unsafe_frac`、各项 eval cost 和分布外测试判断真实安全性。
+- `value_mean`、`value_min` 和 `coefficient_norm` 主要用于检测漂移、塌缩或爆炸，不应作为独立的模型选择目标。
+- 模型选择时应联合观察 validation `derivative_residual`、`value_bound_violation`、第二阶段 `violation_mean/max`、环境 eval unsafe rate 与任务回报，避免只优化单一指标。
 
 ### 8.4 恢复边界
 

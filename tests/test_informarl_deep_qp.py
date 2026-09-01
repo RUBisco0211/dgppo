@@ -7,7 +7,7 @@ import jax.tree_util as jtu
 import numpy as np
 
 from dgppo.algo.informarl_deep_qp import (
-    InforMARLHJCRPO,
+    InforMARLDeepQP,
     aggregate_owner_violation,
     mix_hj_advantages,
 )
@@ -16,7 +16,7 @@ from dgppo.env.lidar_env.lidar_target import LidarTarget
 from dgppo.trainer.data import Rollout
 
 
-class InforMARLHJCRPOTest(unittest.TestCase):
+class InforMARLDeepQPTest(unittest.TestCase):
     def assert_tree_equal(self, left, right):
         left_leaves = jtu.tree_leaves(left)
         right_leaves = jtu.tree_leaves(right)
@@ -45,7 +45,7 @@ class InforMARLHJCRPOTest(unittest.TestCase):
             max_step=4,
             params=VMASNavigation.PARAMS.copy(),
         )
-        algo = InforMARLHJCRPO(
+        algo = InforMARLDeepQP(
             env=env,
             node_dim=env.node_dim,
             edge_dim=env.edge_dim,
@@ -70,17 +70,17 @@ class InforMARLHJCRPOTest(unittest.TestCase):
         for key in (
             "Vl/loss",
             "policy/loss",
-            "hj_crpo/constraint_estimate",
-            "hj_crpo/safe_data",
-            "hj_crpo/cbf_weight",
-            "hj_crpo/violation_mean",
+            "deep-qp/policy/constraint_estimate",
+            "deep-qp/policy/safe_data",
+            "deep-qp/policy/cbf_weight",
+            "deep-qp/policy/violation_mean",
         ):
             self.assertIn(key, info)
             self.assertTrue(np.isfinite(np.asarray(info[key])).all())
 
         with tempfile.TemporaryDirectory() as checkpoint_dir:
             algo.save(checkpoint_dir, "latest")
-            restored = InforMARLHJCRPO(
+            restored = InforMARLDeepQP(
                 env=env,
                 node_dim=env.node_dim,
                 edge_dim=env.edge_dim,
@@ -109,7 +109,7 @@ class InforMARLHJCRPOTest(unittest.TestCase):
         params["n_obs"] = 1
         params["n_rays"] = 8
         env = LidarTarget(num_agents=2, max_step=4, params=params)
-        algo = InforMARLHJCRPO(
+        algo = InforMARLDeepQP(
             env=env,
             node_dim=env.node_dim,
             edge_dim=env.edge_dim,
@@ -127,7 +127,11 @@ class InforMARLHJCRPOTest(unittest.TestCase):
         info = algo.update(rollout, step=0)
         self.assertEqual(rollout.actions.shape, (1, 4, 2, 2))
         self.assertTrue(np.isfinite(np.asarray(info["policy/loss"])))
-        self.assertTrue(np.isfinite(np.asarray(info["hj_crpo/violation_mean"])))
+        self.assertTrue(
+            np.isfinite(
+                np.asarray(info["deep-qp/policy/violation_mean"])
+            )
+        )
 
 
 if __name__ == "__main__":

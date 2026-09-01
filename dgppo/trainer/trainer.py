@@ -86,7 +86,10 @@ def _training_metrics(update_info: dict):
         "train/agents/actor_grad_norm": ("policy/grad_norm",),
         "train/agents/critic_l_grad_norm": ("Vl/grad_norm",),
         "train/agents/critic_h_grad_norm": ("Vh/grad_Vh_norm", "Vh/grad_norm"),
-        "train/agents/safe_ratio": ("hj_crpo/safe_data", "eval/safe_data"),
+        "train/agents/safe_ratio": (
+            "deep-qp/policy/safe_data",
+            "eval/safe_data",
+        ),
     }
     metrics = {}
     for output_key, candidates in aliases.items():

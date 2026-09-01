@@ -51,7 +51,7 @@ def mix_hj_advantages(
     return jnp.where(is_safe, task_advantage, 0.0) - cbf_weight * owner_violation
 
 
-class InforMARLHJCRPO(InforMARL):
+class InforMARLDeepQP(InforMARL):
     """CTDE PPO with DGPPO-style mixing driven by a pretrained Graph-HJ critic.
 
     Execution is the ordinary decentralized InforMARL actor. During centralized
@@ -88,7 +88,7 @@ class InforMARLHJCRPO(InforMARL):
         super().__init__(*args, train_steps=train_steps, **kwargs)
         if not isinstance(self._env, (LidarEnv, VMASNavigation)):
             raise ValueError(
-                "InforMARLHJCRPO currently targets LidarEnv and the "
+                "InforMARLDeepQP currently targets LidarEnv and the "
                 "VMASNavigation family."
             )
         if hj_cbf_alpha < 0.0:
@@ -311,14 +311,14 @@ class InforMARLHJCRPO(InforMARL):
             update_fn, (Vl_train_state, policy_train_state), batch_idx
         )
         info = jtu.tree_map(lambda x: x[-1], info) | {
-            "hj_crpo/constraint_estimate": constraint_estimate,
-            "hj_crpo/safe_data": (bTa_owner_violation <= 0.0).mean(),
-            "hj_crpo/cbf_weight": current_cbf_weight,
-            "hj_crpo/violation_mean": bTa_violation.mean(),
-            "hj_crpo/violation_max": bTa_violation.max(),
-            "hj_crpo/residual_min": bTa_residual.min(),
-            "hj_crpo/value_min": certificate.value.min(),
-            "hj_crpo/neighborhood_density": certificate.action_mask.mean(),
+            "deep-qp/policy/constraint_estimate": constraint_estimate,
+            "deep-qp/policy/safe_data": (bTa_owner_violation <= 0.0).mean(),
+            "deep-qp/policy/cbf_weight": current_cbf_weight,
+            "deep-qp/policy/violation_mean": bTa_violation.mean(),
+            "deep-qp/policy/violation_max": bTa_violation.max(),
+            "deep-qp/policy/residual_min": bTa_residual.min(),
+            "deep-qp/policy/value_min": certificate.value.min(),
+            "deep-qp/policy/neighborhood_density": certificate.action_mask.mean(),
         }
         return Vl_train_state, policy_train_state, info
 
@@ -355,10 +355,6 @@ class InforMARLHJCRPO(InforMARL):
         safety_path = Path(load_dir) / str(step) / "deep_qp_safety.pkl"
         if not safety_path.exists():
             raise FileNotFoundError(
-                f"HJ-CRPO checkpoint is missing frozen critic: {safety_path}"
+                f"Deep-QP checkpoint is missing frozen critic: {safety_path}"
             )
         self.load_safety_checkpoint(safety_path)
-
-
-# Preserve the experimental name used by early local configs.
-InforMARLDeepQP = InforMARLHJCRPO
