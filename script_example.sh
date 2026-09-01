@@ -13,3 +13,6 @@ python train.py --env LidarSpread --algo dgppo -n 3 --obs 3 \
 
 # Two-stage Deep-QP training: Graph-HJ pretraining, then constrained InforMARL.
 # python train.py --env LidarSpread --algo deepqp -n 3 --obs 3
+
+# Graph HJ network as GCBF visualization for an ego agent 
+python ./deep_qp_visualize.py --policy-dir logs/LidarSpread/dgppo/seed0_831102005_KHPJ --deep-qp-checkpoint logs/LidarSpread/deepqp/seed0_0831113946_FRLF/deep-qp -n 5 --obs 4
