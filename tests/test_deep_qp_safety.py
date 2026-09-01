@@ -1,4 +1,6 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -9,6 +11,7 @@ import numpy as np
 from dgppo.algo.module.deep_qp_safety import DeepQPSafetyConfig, GraphHJSafetyCritic
 from dgppo.env.safety_constraint import (
     safety_constraint,
+    safety_constraint_metadata,
     safety_node_feature_mask,
     vmas_navigation_safety_constraint,
 )
@@ -155,6 +158,72 @@ class GraphHJSafetyCriticTest(unittest.TestCase):
             replay.sample(2).actions.shape,
             (2, self.env.num_agents, self.env.action_dim),
         )
+
+    def test_checkpoint_agent_count_transfer_is_eval_only_opt_in(self):
+        source_metadata = safety_constraint_metadata(
+            self.env,
+            agent_margin=0.02,
+            obstacle_margin=0.02,
+            braking_accel=None,
+        )
+        target_env = VMASNavigation(
+            num_agents=3,
+            max_step=4,
+            params=VMASNavigation.PARAMS.copy(),
+        )
+        target_graph = target_env.reset(jr.PRNGKey(11))
+        lower, upper = target_env.action_lim()
+        target_critic = GraphHJSafetyCritic(
+            target_env.action_dim,
+            target_env.num_agents,
+            lower,
+            upper,
+            self.config,
+            node_feature_mask=safety_node_feature_mask(target_env),
+        )
+        target_state = target_critic.initialize(jr.PRNGKey(12), target_graph)
+        target_metadata = safety_constraint_metadata(
+            target_env,
+            agent_margin=0.02,
+            obstacle_margin=0.02,
+            braking_accel=None,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "deep_qp_safety.pkl"
+            self.critic.save_checkpoint(
+                self.state, checkpoint, metadata=source_metadata
+            )
+            with self.assertRaisesRegex(ValueError, "n_agents"):
+                target_critic.load_checkpoint(
+                    target_state,
+                    checkpoint,
+                    expected_metadata=target_metadata,
+                )
+            with self.assertWarnsRegex(UserWarning, "transferring frozen"):
+                transferred = target_critic.load_checkpoint(
+                    target_state,
+                    checkpoint,
+                    expected_metadata=target_metadata,
+                    allow_agent_count_transfer=True,
+                )
+
+        for source, target in zip(
+            jtu.tree_leaves(self.state.target_params),
+            jtu.tree_leaves(transferred.target_params),
+        ):
+            np.testing.assert_array_equal(source, target)
+        target_constraint = safety_constraint(
+            target_env, target_graph, braking_accel=None
+        )
+        certificate = target_critic.certify(
+            transferred.target_params,
+            target_graph,
+            target_constraint,
+            self.config.lambda_init,
+        )
+        self.assertEqual(certificate.value.shape, (3,))
+        self.assertEqual(certificate.coefficient.shape, (3, 3, 2))
 
 
 if __name__ == "__main__":

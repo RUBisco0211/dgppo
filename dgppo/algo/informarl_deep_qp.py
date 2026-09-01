@@ -77,6 +77,7 @@ class InforMARLDeepQP(InforMARL):
             deep_qp_agent_margin: float = 0.02,
             deep_qp_obstacle_margin: float = 0.02,
             deep_qp_braking_accel: Optional[float] = None,
+            deep_qp_allow_agent_count_transfer: bool = False,
             hj_cbf_alpha: float = 1.0,
             hj_cbf_margin: float = 0.0,
             hj_cbf_eps: float = 0.0,
@@ -129,6 +130,9 @@ class InforMARLDeepQP(InforMARL):
         self.deep_qp_agent_margin = deep_qp_agent_margin
         self.deep_qp_obstacle_margin = deep_qp_obstacle_margin
         self.deep_qp_braking_accel = deep_qp_braking_accel
+        self.deep_qp_allow_agent_count_transfer = (
+            deep_qp_allow_agent_count_transfer
+        )
         self.hj_cbf_alpha = hj_cbf_alpha
         self.hj_cbf_margin = hj_cbf_margin
         self.hj_cbf_eps = hj_cbf_eps
@@ -154,6 +158,9 @@ class InforMARLDeepQP(InforMARL):
             "deep_qp_agent_margin": self.deep_qp_agent_margin,
             "deep_qp_obstacle_margin": self.deep_qp_obstacle_margin,
             "deep_qp_braking_accel": self.deep_qp_braking_accel,
+            "deep_qp_allow_agent_count_transfer": (
+                self.deep_qp_allow_agent_count_transfer
+            ),
             "hj_cbf_alpha": self.hj_cbf_alpha,
             "hj_cbf_margin": self.hj_cbf_margin,
             "hj_cbf_eps": self.hj_cbf_eps,
@@ -337,11 +344,21 @@ class InforMARLDeepQP(InforMARL):
             metadata=self._checkpoint_metadata(),
         )
 
-    def load_safety_checkpoint(self, path: str | Path) -> None:
+    def load_safety_checkpoint(
+            self,
+            path: str | Path,
+            *,
+            allow_agent_count_transfer: Optional[bool] = None,
+    ) -> None:
+        if allow_agent_count_transfer is None:
+            allow_agent_count_transfer = (
+                self.deep_qp_allow_agent_count_transfer
+            )
         self.safety_train_state = self.safety_critic.load_checkpoint(
             self.safety_train_state,
             path,
             expected_metadata=self._checkpoint_metadata(),
+            allow_agent_count_transfer=allow_agent_count_transfer,
         )
 
     def save(self, save_dir: str, step: int):

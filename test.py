@@ -89,6 +89,12 @@ def test(args):
         deep_qp_agent_margin=getattr(config, "deep_qp_agent_margin", 0.02),
         deep_qp_obstacle_margin=getattr(config, "deep_qp_obstacle_margin", 0.02),
         deep_qp_braking_accel=getattr(config, "deep_qp_braking_accel", None),
+        deep_qp_allow_agent_count_transfer=(
+            num_agents != config.num_agents
+            or getattr(
+                config, "deep_qp_allow_agent_count_transfer", False
+            )
+        ),
         hj_cbf_alpha=getattr(config, "hj_cbf_alpha", 1.0),
         hj_cbf_margin=getattr(config, "hj_cbf_margin", 0.0),
         hj_cbf_eps=getattr(config, "hj_cbf_eps", 0.0),

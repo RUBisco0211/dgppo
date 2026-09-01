@@ -92,12 +92,20 @@ def _config_from_payload(payload: dict[str, Any]) -> DeepQPSafetyConfig:
     return DeepQPSafetyConfig(**{key: value for key, value in saved.items() if key in valid_names})
 
 
-def _make_checkpoint_env(payload: dict[str, Any], max_step: int) -> LidarEnv:
+def _make_checkpoint_env(
+    payload: dict[str, Any],
+    max_step: int,
+    num_agents: int | None = None,
+) -> LidarEnv:
     metadata = payload.get("metadata", {})
     env_name = metadata.get("env_class", "LidarSpread")
     env = make_env(
         env_id=env_name,
-        num_agents=int(payload["n_agents"]),
+        num_agents=(
+            int(payload["n_agents"])
+            if num_agents is None
+            else num_agents
+        ),
         num_obs=metadata.get("n_obs"),
         n_rays=metadata.get("n_rays"),
         max_step=max_step,
@@ -139,6 +147,9 @@ def _load_safety_critic(
         state,
         checkpoint,
         expected_metadata=expected_metadata,
+        allow_agent_count_transfer=(
+            env.num_agents != int(payload["n_agents"])
+        ),
     )
     safety_lambda = float(
         np.asarray(safety_lambda_at(config, int(np.asarray(payload["step"]))))
@@ -174,7 +185,6 @@ def _load_policy(
 
     expected = {
         "env": type(env).__name__,
-        "num_agents": env.num_agents,
         "obs": env.params["n_obs"],
     }
     for name, value in expected.items():
@@ -577,12 +587,15 @@ def visualize(args: argparse.Namespace) -> list[Path]:
         raise ValueError("frames/frame-stride must be positive and grid-size >= 3")
     if args.fps <= 0.0 or args.dpi <= 0:
         raise ValueError("fps and dpi must be positive")
+    if args.num_agents is not None and args.num_agents <= 0:
+        raise ValueError("num-agents must be positive")
 
     checkpoint = _checkpoint_file(args.deep_qp_checkpoint)
     payload = _load_checkpoint_payload(checkpoint)
     env = _make_checkpoint_env(
         payload,
         max_step=args.rollout_start + args.frames * args.frame_stride + 1,
+        num_agents=args.num_agents,
     )
     init_graph = env.reset(jr.PRNGKey(args.seed))
     critic, safety_state, safety_lambda = _load_safety_critic(
@@ -690,6 +703,16 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="numeric models/<step> checkpoint; defaults to the latest",
+    )
+    parser.add_argument(
+        "-n",
+        "--num-agents",
+        type=int,
+        default=None,
+        help=(
+            "target evaluation agent count; defaults to the Graph-HJ "
+            "checkpoint count"
+        ),
     )
     parser.add_argument(
         "--output-dir",

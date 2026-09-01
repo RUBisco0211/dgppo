@@ -2,6 +2,7 @@
 
 import functools as ft
 import pickle
+import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -257,7 +258,17 @@ class GraphHJSafetyCritic:
             state: DeepQPSafetyTrainState,
             path: str | Path,
             expected_metadata: dict[str, Any] | None = None,
+            *,
+            allow_agent_count_transfer: bool = False,
     ) -> DeepQPSafetyTrainState:
+        """Load a Graph-HJ checkpoint.
+
+        ``allow_agent_count_transfer`` is intentionally opt-in.  Graph-HJ's
+        shared GNN and output heads have parameter shapes that do not depend on
+        the number of agents, so frozen parameters can be evaluated with a new
+        graph cardinality.  Training resume remains strict by default because
+        its replay data and optimization state belong to the source setting.
+        """
         path = Path(path)
         if path.is_dir():
             path = path / "deep_qp_safety.pkl"
@@ -284,11 +295,44 @@ class GraphHJSafetyCritic:
             if field in saved_config and saved_config[field] != getattr(self.config, field):
                 raise ValueError(f"safety checkpoint {field} does not match the critic")
         saved_metadata = payload.get("metadata", {})
+        saved_n_agents = payload.get("n_agents")
+        metadata_n_agents = saved_metadata.get("n_agents")
+        if (
+            saved_n_agents is not None
+            and metadata_n_agents is not None
+            and saved_n_agents != metadata_n_agents
+        ):
+            raise ValueError(
+                "safety checkpoint n_agents disagrees with its metadata"
+            )
+        checkpoint_n_agents = (
+            saved_n_agents
+            if saved_n_agents is not None
+            else metadata_n_agents
+        )
+        if (
+            checkpoint_n_agents is not None
+            and checkpoint_n_agents != self.n_agents
+        ):
+            if not allow_agent_count_transfer:
+                raise ValueError(
+                    "safety checkpoint n_agents does not match the critic"
+                )
+            warnings.warn(
+                "transferring frozen Graph-HJ parameters from "
+                f"n_agents={checkpoint_n_agents} to "
+                f"n_agents={self.n_agents}; parameter shapes are shared, "
+                "but safety generalization must be evaluated",
+                UserWarning,
+                stacklevel=2,
+            )
         if expected_metadata is not None:
             for field, expected in expected_metadata.items():
                 if field not in saved_metadata:
                     raise ValueError(f"safety checkpoint metadata {field} is missing")
                 if saved_metadata[field] != expected:
+                    if field == "n_agents" and allow_agent_count_transfer:
+                        continue
                     raise ValueError(f"safety checkpoint metadata {field} does not match")
         online = state.online.replace(
             params=payload["online_params"],

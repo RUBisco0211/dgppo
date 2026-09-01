@@ -133,6 +133,67 @@ class InforMARLDeepQPTest(unittest.TestCase):
             )
         )
 
+    def test_frozen_hj_checkpoint_transfers_to_larger_policy_team(self):
+        source_env = VMASNavigation(
+            num_agents=2,
+            max_step=4,
+            params=VMASNavigation.PARAMS.copy(),
+        )
+        source = InforMARLDeepQP(
+            env=source_env,
+            node_dim=source_env.node_dim,
+            edge_dim=source_env.edge_dim,
+            state_dim=source_env.state_dim,
+            action_dim=source_env.action_dim,
+            n_agents=source_env.num_agents,
+            use_rnn=False,
+            batch_size=source_env.max_episode_steps,
+            rnn_step=source_env.max_episode_steps,
+            deep_qp_gnn_out_dim=8,
+            deep_qp_hidden_dim=16,
+            deep_qp_hidden_layers=1,
+        )
+        target_env = VMASNavigation(
+            num_agents=3,
+            max_step=4,
+            params=VMASNavigation.PARAMS.copy(),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = f"{directory}/deep_qp_safety.pkl"
+            source.save_safety_checkpoint(checkpoint)
+            with self.assertWarnsRegex(UserWarning, "transferring frozen"):
+                target = InforMARLDeepQP(
+                    env=target_env,
+                    node_dim=target_env.node_dim,
+                    edge_dim=target_env.edge_dim,
+                    state_dim=target_env.state_dim,
+                    action_dim=target_env.action_dim,
+                    n_agents=target_env.num_agents,
+                    use_rnn=False,
+                    batch_size=target_env.max_episode_steps,
+                    rnn_step=target_env.max_episode_steps,
+                    deep_qp_checkpoint=checkpoint,
+                    deep_qp_allow_agent_count_transfer=True,
+                    deep_qp_gnn_out_dim=8,
+                    deep_qp_hidden_dim=16,
+                    deep_qp_hidden_layers=1,
+                )
+
+        rollout = target.collect(target.params, jr.split(jr.PRNGKey(13), 1))
+        frozen_safety_state = target.safety_train_state
+        info = target.update(rollout, step=0)
+        self.assertEqual(rollout.actions.shape, (1, 4, 3, 2))
+        self.assertTrue(np.isfinite(np.asarray(info["policy/loss"])))
+        self.assertTrue(
+            np.isfinite(
+                np.asarray(info["deep-qp/policy/violation_mean"])
+            )
+        )
+        self.assert_tree_equal(
+            frozen_safety_state, target.safety_train_state
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

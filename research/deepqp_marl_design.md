@@ -137,6 +137,24 @@ python train_safety_filter.py \
   --output-dir ./logs/deep_qp_safety/lidar_spread
 ```
 
+预训练完成后，可以在保持 Graph-HJ 参数树完全不变的前提下，把冻结
+critic 加载到不同 agent 数量的第二阶段：
+
+```bash
+python train.py \
+  --env LidarSpread --algo informarl_deep_qp -n 8 --obs 3 \
+  --deep-qp-checkpoint \
+    ./logs/deep_qp_safety/lidar_spread/deep_qp_safety.pkl \
+  --deep-qp-allow-agent-count-transfer
+```
+
+实现会按照目标数量重新创建环境、Graph-HJ 输出张量和 actor RNN state，
+然后加载共享 GNN/value/scalar/pair-head 参数。该选项只跳过 checkpoint 中
+`n_agents` 的不一致；网络结构、动力学、通信半径、动作范围、约束适配器和
+`top_k_rays` 仍按原规则严格检查。默认不启用该选项，因此原有同数量训练和
+恢复训练保持原行为。数量迁移仅提供工程上的 eval/冻结使用能力，不把未见
+局部邻居密度下的安全泛化当作理论保证。
+
 ## 5. RL 阶段的 CBF 残差
 
 冻结 critic 后，对 rollout 中的联合动作计算：

@@ -165,6 +165,9 @@ def _train_rl(args):
         deep_qp_agent_margin=args.deep_qp_agent_margin,
         deep_qp_obstacle_margin=args.deep_qp_obstacle_margin,
         deep_qp_braking_accel=args.deep_qp_braking_accel,
+        deep_qp_allow_agent_count_transfer=(
+            getattr(args, "deep_qp_allow_agent_count_transfer", False)
+        ),
         hj_cbf_alpha=args.hj_cbf_alpha,
         hj_cbf_margin=args.hj_cbf_margin,
         hj_cbf_eps=args.hj_cbf_eps,
@@ -427,6 +430,15 @@ def main():
     parser.add_argument("--deep-qp-agent-margin", type=float, default=0.02)
     parser.add_argument("--deep-qp-obstacle-margin", type=float, default=0.02)
     parser.add_argument("--deep-qp-braking-accel", type=float, default=None)
+    parser.add_argument(
+        "--deep-qp-allow-agent-count-transfer",
+        action="store_true",
+        default=False,
+        help=(
+            "allow a frozen Graph-HJ checkpoint trained with a different "
+            "agent count; all other safety metadata remains strict"
+        ),
+    )
     parser.add_argument("--deep-qp-pretrain-steps", type=int, default=1_000_000)
     parser.add_argument("--deep-qp-pretrain-n-env", type=int, default=32)
     parser.add_argument("--deep-qp-pretrain-rollout-steps", type=int, default=32)

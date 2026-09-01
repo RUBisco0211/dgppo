@@ -149,6 +149,19 @@ algorithms' optimization hyperparameters or update rules. Shared logging,
 checkpoint, and W&B behavior has been enhanced for every algorithm. For details, see the
 [unified Deep-QP design and training document](research/deepqp_marl_design.md).
 
+To reuse a separately pretrained frozen Graph-HJ critic with a different policy-team
+size, opt in explicitly while starting stage 2:
+
+```bash
+python train.py --env LidarSpread --algo informarl_deep_qp -n 8 --obs 3 \
+  --deep-qp-checkpoint ./logs/deep_qp_safety/lidar_spread/deep_qp_safety.pkl \
+  --deep-qp-allow-agent-count-transfer
+```
+
+Only the agent-count metadata check is relaxed. Network structure, dynamics,
+observation, action, and safety-constraint metadata remain strict. Existing
+same-count training and resume commands require no changes.
+
 The training logs will be saved in `logs/<env>/<algo>/seed<seed>_<timestamp>_<four random letters>`. We provide the following flags:
 
 #### Required Flags
