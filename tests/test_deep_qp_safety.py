@@ -225,6 +225,40 @@ class GraphHJSafetyCriticTest(unittest.TestCase):
         self.assertEqual(certificate.value.shape, (3,))
         self.assertEqual(certificate.coefficient.shape, (3, 3, 2))
 
+    def test_checkpoint_obstacle_count_transfer_is_eval_only_opt_in(self):
+        source_metadata = safety_constraint_metadata(
+            self.env,
+            agent_margin=0.02,
+            obstacle_margin=0.02,
+            braking_accel=None,
+        )
+        target_metadata = source_metadata | {
+            "n_obs": source_metadata["n_obs"] + 2
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "deep_qp_safety.pkl"
+            self.critic.save_checkpoint(
+                self.state, checkpoint, metadata=source_metadata
+            )
+            with self.assertRaisesRegex(ValueError, "n_obs"):
+                self.critic.load_checkpoint(
+                    self.state,
+                    checkpoint,
+                    expected_metadata=target_metadata,
+                )
+            with self.assertWarnsRegex(UserWarning, "n_obs"):
+                transferred = self.critic.load_checkpoint(
+                    self.state,
+                    checkpoint,
+                    expected_metadata=target_metadata,
+                    allow_obstacle_count_transfer=True,
+                )
+        for source, target in zip(
+            jtu.tree_leaves(self.state.target_params),
+            jtu.tree_leaves(transferred.target_params),
+        ):
+            np.testing.assert_array_equal(source, target)
+
 
 if __name__ == "__main__":
     unittest.main()

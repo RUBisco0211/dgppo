@@ -260,14 +260,15 @@ class GraphHJSafetyCritic:
             expected_metadata: dict[str, Any] | None = None,
             *,
             allow_agent_count_transfer: bool = False,
+            allow_obstacle_count_transfer: bool = False,
     ) -> DeepQPSafetyTrainState:
         """Load a Graph-HJ checkpoint.
 
-        ``allow_agent_count_transfer`` is intentionally opt-in.  Graph-HJ's
-        shared GNN and output heads have parameter shapes that do not depend on
-        the number of agents, so frozen parameters can be evaluated with a new
-        graph cardinality.  Training resume remains strict by default because
-        its replay data and optimization state belong to the source setting.
+        The transfer flags are intentionally opt-in.  Graph-HJ's shared GNN and
+        output heads have parameter shapes that do not depend on graph
+        cardinality, so frozen parameters can be evaluated with new agent or
+        obstacle counts.  Training resume remains strict by default because its
+        replay data and optimization state belong to the source setting.
         """
         path = Path(path)
         if path.is_dir():
@@ -332,6 +333,17 @@ class GraphHJSafetyCritic:
                     raise ValueError(f"safety checkpoint metadata {field} is missing")
                 if saved_metadata[field] != expected:
                     if field == "n_agents" and allow_agent_count_transfer:
+                        continue
+                    if field == "n_obs" and allow_obstacle_count_transfer:
+                        warnings.warn(
+                            "transferring frozen Graph-HJ parameters from "
+                            f"n_obs={saved_metadata[field]} to n_obs={expected}; "
+                            "the network consumes LiDAR hits rather than the "
+                            "physical obstacle count, but safety generalization "
+                            "must be evaluated",
+                            UserWarning,
+                            stacklevel=2,
+                        )
                         continue
                     raise ValueError(f"safety checkpoint metadata {field} does not match")
         online = state.online.replace(

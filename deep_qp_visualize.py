@@ -13,7 +13,8 @@ Example
 -------
 python deep_qp_visualize.py \
     --deep-qp-checkpoint logs/LidarSpread/deepqp \
-    --policy-dir logs/LidarSpread/dgppo/seed0_707102621_YGIV
+    --policy-dir logs/LidarSpread/dgppo/seed0_707102621_YGIV \
+    --num-agents 8 --num-obs 6
 """
 
 from __future__ import annotations
@@ -96,6 +97,7 @@ def _make_checkpoint_env(
     payload: dict[str, Any],
     max_step: int,
     num_agents: int | None = None,
+    num_obs: int | None = None,
 ) -> LidarEnv:
     metadata = payload.get("metadata", {})
     env_name = metadata.get("env_class", "LidarSpread")
@@ -106,7 +108,7 @@ def _make_checkpoint_env(
             if num_agents is None
             else num_agents
         ),
-        num_obs=metadata.get("n_obs"),
+        num_obs=(metadata.get("n_obs") if num_obs is None else num_obs),
         n_rays=metadata.get("n_rays"),
         max_step=max_step,
         full_observation=False,
@@ -150,6 +152,10 @@ def _load_safety_critic(
         allow_agent_count_transfer=(
             env.num_agents != int(payload["n_agents"])
         ),
+        allow_obstacle_count_transfer=(
+            metadata.get("n_obs") is not None
+            and env.params["n_obs"] != metadata["n_obs"]
+        ),
     )
     safety_lambda = float(
         np.asarray(safety_lambda_at(config, int(np.asarray(payload["step"]))))
@@ -185,7 +191,6 @@ def _load_policy(
 
     expected = {
         "env": type(env).__name__,
-        "obs": env.params["n_obs"],
     }
     for name, value in expected.items():
         configured = _cfg_get(config, name)
@@ -229,7 +234,14 @@ def _load_policy(
         cbf_schedule=_cfg_get(config, "cbf_schedule", True),
     )
     step = _latest_policy_step(models_dir) if policy_step is None else policy_step
-    algo.load(str(models_dir), step)
+    actor_path = models_dir / str(step) / "actor.pkl"
+    if not actor_path.is_file():
+        raise FileNotFoundError(f"policy actor checkpoint not found: {actor_path}")
+    with actor_path.open("rb") as file:
+        actor_params = pickle.load(file)
+    algo.policy_train_state = algo.policy_train_state.replace(
+        params=actor_params
+    )
     act = jax.jit(algo.act)
     label = f"{_cfg_get(config, 'algo')}:{policy_dir.name}/step={step}"
     return act, algo.init_rnn_state, label
@@ -385,6 +397,8 @@ def _symmetric_value_limit(
 
 
 def _draw_obstacles(ax, obstacles) -> None:
+    if obstacles is None:
+        return
     points = np.asarray(obstacles.points)
     for polygon in points:
         ax.add_patch(
@@ -589,6 +603,8 @@ def visualize(args: argparse.Namespace) -> list[Path]:
         raise ValueError("fps and dpi must be positive")
     if args.num_agents is not None and args.num_agents <= 0:
         raise ValueError("num-agents must be positive")
+    if args.num_obs is not None and args.num_obs < 0:
+        raise ValueError("num-obs must be non-negative")
 
     checkpoint = _checkpoint_file(args.deep_qp_checkpoint)
     payload = _load_checkpoint_payload(checkpoint)
@@ -596,6 +612,7 @@ def visualize(args: argparse.Namespace) -> list[Path]:
         payload,
         max_step=args.rollout_start + args.frames * args.frame_stride + 1,
         num_agents=args.num_agents,
+        num_obs=args.num_obs,
     )
     init_graph = env.reset(jr.PRNGKey(args.seed))
     critic, safety_state, safety_lambda = _load_safety_critic(
@@ -668,6 +685,10 @@ def visualize(args: argparse.Namespace) -> list[Path]:
     print(
         "checkpoint="
         f"{checkpoint}, step={int(np.asarray(payload['step']))}, "
+        f"source_agents={int(payload['n_agents'])}, "
+        f"eval_agents={env.num_agents}, "
+        f"source_obs={payload['metadata'].get('n_obs')}, "
+        f"eval_obs={env.params['n_obs']}, "
         f"lambda={safety_lambda:.8f}, value_limit=±{value_limit:.5f}",
         flush=True,
     )
@@ -711,6 +732,17 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "target evaluation agent count; defaults to the Graph-HJ "
+            "checkpoint count"
+        ),
+    )
+    parser.add_argument(
+        "--num-obs",
+        "--obs",
+        dest="num_obs",
+        type=int,
+        default=None,
+        help=(
+            "target physical obstacle count; defaults to the Graph-HJ "
             "checkpoint count"
         ),
     )
