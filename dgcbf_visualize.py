@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, NamedTuple, Sequence
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+os.environ.setdefault("TF_GPU_ALLOCATOR", "cuda_malloc_async")
 
 import jax
 import jax.numpy as jnp
@@ -300,12 +301,43 @@ def _make_grid_evaluator(
     )
 
 
+def _evaluate_grid_in_chunks(
+    evaluator: Callable,
+    grid_points: jax.Array,
+    *fixed_args: Any,
+    batch_size: int,
+) -> np.ndarray:
+    """Evaluate a grid with a bounded accelerator batch size.
+
+    The final batch is padded by repeating its last point so every invocation
+    has the same shape and JAX only needs to compile one executable.  Padded
+    outputs are discarded before the chunks are concatenated.
+    """
+    if batch_size <= 0:
+        raise ValueError("grid-batch-size must be positive")
+    n_points = int(grid_points.shape[0])
+    if n_points == 0:
+        raise ValueError("grid_points must not be empty")
+
+    chunks = []
+    for start in range(0, n_points, batch_size):
+        valid_size = min(batch_size, n_points - start)
+        batch = grid_points[start : start + valid_size]
+        if valid_size < batch_size:
+            padding = jnp.repeat(batch[-1:], batch_size - valid_size, axis=0)
+            batch = jnp.concatenate((batch, padding), axis=0)
+        evaluated = np.asarray(evaluator(batch, *fixed_args))
+        chunks.append(evaluated[:valid_size])
+    return np.concatenate(chunks, axis=0)
+
+
 def _evaluate_contours(
     snapshots: Sequence[Snapshot],
     evaluators: dict[int, Callable],
     grid_points: jax.Array,
     zero_rnn_state: Any,
     rnn_state_mode: str,
+    grid_batch_size: int,
 ) -> tuple[
     dict[int, list[np.ndarray]],
     dict[int, list[np.ndarray]],
@@ -323,14 +355,14 @@ def _evaluate_contours(
         )
         obstacles = jax.tree.map(jnp.asarray, env_state.obstacle)
         for ego, evaluator in evaluators.items():
-            evaluated = np.asarray(
-                evaluator(
-                    grid_points,
-                    jnp.asarray(env_state.agent),
-                    jnp.asarray(env_state.goal),
-                    obstacles,
-                    jnp.asarray(rnn_state),
-                )
+            evaluated = _evaluate_grid_in_chunks(
+                evaluator,
+                grid_points,
+                jnp.asarray(env_state.agent),
+                jnp.asarray(env_state.goal),
+                obstacles,
+                jnp.asarray(rnn_state),
+                batch_size=grid_batch_size,
             )
             values[ego].append(evaluated[:, 0])
             clearances[ego].append(evaluated[:, 1])
@@ -583,6 +615,8 @@ def _save_gif(frames: Sequence[Image.Image], path: Path, fps: float) -> None:
 def visualize(args: argparse.Namespace) -> list[Path]:
     if args.frames <= 0 or args.frame_stride <= 0 or args.grid_size < 3:
         raise ValueError("frames/frame-stride must be positive and grid-size >= 3")
+    if args.grid_batch_size <= 0:
+        raise ValueError("grid-batch-size must be positive")
     if args.fps <= 0.0 or args.dpi <= 0:
         raise ValueError("fps and dpi must be positive")
     if args.num_agents is not None and args.num_agents <= 0:
@@ -624,6 +658,7 @@ def visualize(args: argparse.Namespace) -> list[Path]:
         grid_points,
         algo.init_rnn_state,
         args.rnn_state_mode,
+        args.grid_batch_size,
     )
     value_limit = _symmetric_value_limit(values, args.value_limit)
 
@@ -664,6 +699,7 @@ def visualize(args: argparse.Namespace) -> list[Path]:
         f"eval_agents={env.num_agents}, "
         f"source_obs={_cfg_get(config, 'obs')}, eval_obs={env.params['n_obs']}, "
         f"channel={args.cost_channel}, RNN={args.rnn_state_mode}, "
+        f"grid_batch_size={args.grid_batch_size}, "
         f"value_limit=±{value_limit:.5f}",
         flush=True,
     )
@@ -720,6 +756,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--frame-stride", type=int, default=4)
     parser.add_argument("--rollout-start", type=int, default=0)
     parser.add_argument("--grid-size", type=int, default=65)
+    parser.add_argument(
+        "--grid-batch-size",
+        type=int,
+        default=128,
+        help=(
+            "number of counterfactual graph points evaluated together; "
+            "lower this to reduce GPU memory use"
+        ),
+    )
     parser.add_argument("--fps", type=float, default=4.0)
     parser.add_argument("--dpi", type=int, default=110)
     parser.add_argument("--seed", type=int, default=0)
