@@ -36,7 +36,7 @@ $$
 - filter intervention、infeasible、action delta 指标；
 - PPO 期间在线更新 safety critic 的 replay 路径。
 
-保留的结构包括连续安全约束适配器、独立 replay、Deep-QP 双值头、目标网络、HJ 损失和安全 checkpoint。
+保留的结构包括直接读取环境 cost 的安全目标、独立 replay、Deep-QP 双值头、目标网络、HJ 损失和安全 checkpoint。
 
 ## 3. 分布式 Graph-HJ critic
 
@@ -119,6 +119,37 @@ $$
 
 HJ 训练继续使用双值头、target network、Bellman 值回归以及方向导数分解损失。关键变化只是把原来的自身动作内积改为完整局部联合动作内积。
 
+### 3.4 Value head 与导数 head 必须联合训练
+
+当前实现中的 Value 网络和导数网络不是两个可以独立开关的 critic。它们共享
+同一个 `LocalSafetyGNN` 编码器，只在输出端分成两个 Value head、
+`PairCoefficientHead` 和 `ScalarHead`。第一阶段的总损失为：
+
+$$
+L_{\mathrm{safety}}
+=
+w_V L_V
++
+w_D\left(L_{\mathrm{coefficient}}+L_{\mathrm{scalar}}\right).
+$$
+
+导数部分通过两条路径影响 HJ Value：
+
+1. derivative loss 会通过共享 GNN 的梯度改变 Value head 使用的图嵌入；
+2. Value 的 Bellman target 本身使用 target coefficient、target scalar 和动作
+   support function 构造，因此导数输出不是单纯的辅助监督。
+
+所以，简单把 `derivative_loss_weight` 设为 0 并不能得到有效的 value-only
+训练：未训练的导数 head 仍会进入 Value target，其随机或失真的输出会污染
+Value 学习。当前第二阶段还直接使用 coefficient/scalar head 构造
+$\widehat{\dot V}$ 和 HJ/CBF residual，因此禁用导数训练也会使策略约束失效。
+
+若未来把第二阶段改成 rollout 有限差分 residual，才可以另外设计真正的
+value-only 版本；届时必须同时重写 Value Bellman target、网络输出结构和
+第二阶段 residual，不能只关闭 derivative loss。当前训练流程必须保留导数
+head 的联合训练。若需要降低训练耗时，应优先调整预训练更新次数、batch size
+或网络宽度。
+
 ## 4. 独立 off-policy 预训练
 
 预训练器用 OU、均匀和 bang-bang 动作的混合分布收集 transition：
@@ -150,7 +181,7 @@ python train.py \
 
 实现会按照目标数量重新创建环境、Graph-HJ 输出张量和 actor RNN state，
 然后加载共享 GNN/value/scalar/pair-head 参数。该选项只跳过 checkpoint 中
-`n_agents` 的不一致；网络结构、动力学、通信半径、动作范围、约束适配器和
+`n_agents` 的不一致；网络结构、动力学、通信半径、动作范围、环境 cost 来源和
 `top_k_rays` 仍按原规则严格检查。默认不启用该选项，因此原有同数量训练和
 恢复训练保持原行为。数量迁移仅提供工程上的 eval/冻结使用能力，不把未见
 局部邻居密度下的安全泛化当作理论保证。
@@ -512,7 +543,7 @@ python train.py --env LidarSpread --algo deepqp -n 2 --obs 1 \
 - `informarl` 的 PPO rollout、reward GAE、clipped objective 和参数更新没有修改；仅 `save/load` 增加了优化器、训练步数和 PRNG 状态保存。
 - `informarl_manifold` 继承 `informarl`，因此核心更新不变，但同样继承新的 checkpoint 行为。
 - 只有 `deepqp` 组合入口会预训练并实例化冻结的 Graph-HJ critic，执行第 5、6 节的安全 residual 和混合 advantage；其他 `--algo` 值仍直接进入原有 RL 训练分支。
-- 新增的 `SafetyBatch`、safety replay、连续约束适配器和 Graph-HJ 网络不会进入其他算法的 update 路径。原有环境的 reward、cost 和 dynamics 文件也没有被修改。
+- 新增的 `SafetyBatch`、safety replay 和 Graph-HJ 网络不会进入其他算法的 update 路径。Graph-HJ 直接读取原有环境的 `env.get_cost()`；环境的 reward、cost 和 dynamics 文件没有被修改。
 
 共享 `Trainer` 存在外围行为变化，适用于所有算法：增加本地 JSONL 指标、W&B mode/run ID、计时指标、视频失败容错、训练状态 sidecar 和循环结束后的最终 checkpoint。联网检测也从固定返回在线改为真实探测。这些变化不参与 loss 或梯度计算，因此不会改变 fresh training 的数值更新规则，但会改变日志、checkpoint 内容和部分续训语义。当前 `counters/stage=2` 是 Trainer 的统一日志标签，普通算法出现该字段不表示它执行了 Deep-QP 第二阶段。
 
