@@ -162,9 +162,6 @@ def _train_rl(args):
         ),
         deep_qp_lambda_decay_steps=args.deep_qp_lambda_decay_steps,
         deep_qp_constraint_scale=args.deep_qp_constraint_scale,
-        deep_qp_agent_margin=args.deep_qp_agent_margin,
-        deep_qp_obstacle_margin=args.deep_qp_obstacle_margin,
-        deep_qp_braking_accel=args.deep_qp_braking_accel,
         deep_qp_allow_agent_count_transfer=(
             getattr(args, "deep_qp_allow_agent_count_transfer", False)
         ),
@@ -333,9 +330,6 @@ def _train_deepqp(args):
         lambda_final=lambda_final,
         lambda_decay_steps=args.deep_qp_lambda_decay_steps,
         constraint_scale=args.deep_qp_constraint_scale,
-        agent_margin=args.deep_qp_agent_margin,
-        obstacle_margin=args.deep_qp_obstacle_margin,
-        braking_accel=args.deep_qp_braking_accel,
         output_dir=str(hj_dir),
         resume=None,
         save_interval=args.deep_qp_pretrain_save_interval,
@@ -427,9 +421,6 @@ def main():
     parser.add_argument("--deep-qp-lambda-final", type=float, default=None)
     parser.add_argument("--deep-qp-lambda-decay-steps", type=int, default=1_000_000)
     parser.add_argument("--deep-qp-constraint-scale", type=float, default=0.5)
-    parser.add_argument("--deep-qp-agent-margin", type=float, default=0.02)
-    parser.add_argument("--deep-qp-obstacle-margin", type=float, default=0.02)
-    parser.add_argument("--deep-qp-braking-accel", type=float, default=None)
     parser.add_argument(
         "--deep-qp-allow-agent-count-transfer",
         action="store_true",

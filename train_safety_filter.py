@@ -20,16 +20,13 @@ from tqdm import tqdm
 from dgppo.algo.module.deep_qp_safety import (
     DeepQPSafetyConfig,
     GraphHJSafetyCritic,
+    environment_cost_metadata,
+    graph_hj_node_feature_mask,
     safety_lambda_at,
 )
 from dgppo.env import make_env
 from dgppo.env.base import MultiAgentEnv
 from dgppo.env.lidar_env.base import LidarEnv
-from dgppo.env.safety_constraint import (
-    safety_constraint,
-    safety_constraint_metadata,
-    safety_node_feature_mask,
-)
 from dgppo.env.vmas.vmas_navigation import VMASNavigation
 from dgppo.trainer.data import SafetyBatch
 from dgppo.trainer.safety_buffer import SafetyReplayBuffer
@@ -94,23 +91,9 @@ def _validate_args(args) -> None:
 
 def _make_collector(
         env: MultiAgentEnv,
-        safety_critic: GraphHJSafetyCritic,
         n_env: int,
         rollout_steps: int,
-        agent_margin: float,
-        obstacle_margin: float,
-        braking_accel: float | None,
 ):
-    def constraint_fn(graph):
-        return safety_constraint(
-            env,
-            graph,
-            agent_margin=agent_margin,
-            obstacle_margin=obstacle_margin,
-            braking_accel=braking_accel,
-            maximum_margin=safety_critic.config.constraint_scale,
-        )
-
     def collect_one(key):
         reset_key, mean_key, decay_key, scale_key, key = jr.split(key, 5)
         graph = env.reset(reset_key)
@@ -142,9 +125,12 @@ def _make_collector(
                 jnp.where(mixture == 1, uniform_action, bang_action),
             )
 
-            constraint = constraint_fn(graph)
+            # The environment owns the collision definition. Its cost channels
+            # are unsafe-positive, whereas Graph-HJ consumes one safe-positive
+            # scalar per agent.
+            constraint = -jnp.max(env.get_cost(graph), axis=-1)
             next_graph, _, _, _, _ = env.step(graph, raw_action)
-            next_constraint = constraint_fn(next_graph)
+            next_constraint = -jnp.max(env.get_cost(next_graph), axis=-1)
             done = jnp.any(next_constraint < 0.0)
 
             reset_graph = env.reset(reset_key)
@@ -200,6 +186,7 @@ def train(args):
             "train_safety_filter.py currently targets LidarEnv and the "
             "VMASNavigation family"
         )
+    print("> Graph-HJ safety constraint source: env.get_cost")
 
     config = DeepQPSafetyConfig(
         gnn_layers=args.gnn_layers,
@@ -222,19 +209,14 @@ def train(args):
         env.num_agents,
         lower,
         upper,
-        node_feature_mask=safety_node_feature_mask(env),
+        node_feature_mask=graph_hj_node_feature_mask(env),
         config=config,
     )
     key = jr.PRNGKey(args.seed)
     init_key, reset_key, key = jr.split(key, 3)
     state = safety_critic.initialize(init_key, env.reset(reset_key))
     replay = SafetyReplayBuffer(args.replay_size, seed=args.seed)
-    checkpoint_metadata = safety_constraint_metadata(
-        env,
-        agent_margin=args.agent_margin,
-        obstacle_margin=args.obstacle_margin,
-        braking_accel=args.braking_accel,
-    )
+    checkpoint_metadata = environment_cost_metadata(env)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -256,12 +238,10 @@ def train(args):
             )
 
     collect_batch = _make_collector(
-        env, safety_critic, args.n_env, args.rollout_steps,
-        args.agent_margin, args.obstacle_margin, args.braking_accel
+        env, args.n_env, args.rollout_steps
     )
     eval_collect_batch = _make_collector(
-        env, safety_critic, args.eval_n_env, args.rollout_steps,
-        args.agent_margin, args.obstacle_margin, args.braking_accel
+        env, args.eval_n_env, args.rollout_steps
     )
     eval_key = jr.fold_in(jr.PRNGKey(args.seed), 0x484A)
     eval_batch = eval_collect_batch(eval_key)
@@ -440,9 +420,6 @@ def main():
     parser.add_argument("--lambda-final", type=float, default=0.0001)
     parser.add_argument("--lambda-decay-steps", type=int, default=1_000_000)
     parser.add_argument("--constraint-scale", type=float, default=0.5)
-    parser.add_argument("--agent-margin", type=float, default=0.02)
-    parser.add_argument("--obstacle-margin", type=float, default=0.02)
-    parser.add_argument("--braking-accel", type=float, default=None)
     parser.add_argument("--output-dir", default="./logs/deep_qp_safety")
     parser.add_argument("--resume", default=None)
     parser.add_argument("--save-interval", type=int, default=10_000)

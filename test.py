@@ -86,9 +86,6 @@ def test(args):
         deep_qp_lambda_final=getattr(config, "deep_qp_lambda_final", None),
         deep_qp_lambda_decay_steps=getattr(config, "deep_qp_lambda_decay_steps", 1_000_000),
         deep_qp_constraint_scale=getattr(config, "deep_qp_constraint_scale", 0.5),
-        deep_qp_agent_margin=getattr(config, "deep_qp_agent_margin", 0.02),
-        deep_qp_obstacle_margin=getattr(config, "deep_qp_obstacle_margin", 0.02),
-        deep_qp_braking_accel=getattr(config, "deep_qp_braking_accel", None),
         deep_qp_allow_agent_count_transfer=(
             num_agents != config.num_agents
             or getattr(

@@ -17,18 +17,14 @@ from .informarl import InforMARL
 from .module.deep_qp_safety import (
     DeepQPSafetyConfig,
     GraphHJSafetyCritic,
+    environment_cost_metadata,
+    graph_hj_node_feature_mask,
     safety_lambda_at,
 )
 from .utils import compute_dec_ocp_gae
-from ..env.safety_constraint import (
-    safety_constraint,
-    safety_constraint_metadata,
-    safety_node_feature_mask,
-)
 from ..env.lidar_env.base import LidarEnv
 from ..env.vmas.vmas_navigation import VMASNavigation
 from ..trainer.data import Rollout
-from ..utils.graph import GraphsTuple
 from ..utils.typing import Array, Params
 from ..utils.utils import tree_index
 
@@ -74,9 +70,6 @@ class InforMARLDeepQP(InforMARL):
             deep_qp_lambda_final: Optional[float] = None,
             deep_qp_lambda_decay_steps: int = 1_000_000,
             deep_qp_constraint_scale: float = 0.5,
-            deep_qp_agent_margin: float = 0.02,
-            deep_qp_obstacle_margin: float = 0.02,
-            deep_qp_braking_accel: Optional[float] = None,
             deep_qp_allow_agent_count_transfer: bool = False,
             hj_cbf_alpha: float = 1.0,
             hj_cbf_margin: float = 0.0,
@@ -119,7 +112,7 @@ class InforMARLDeepQP(InforMARL):
             n_agents=self.n_agents,
             action_lower=action_lower,
             action_upper=action_upper,
-            node_feature_mask=safety_node_feature_mask(self._env),
+            node_feature_mask=graph_hj_node_feature_mask(self._env),
             config=critic_config,
         )
         safety_key, self.key = jr.split(self.key)
@@ -127,9 +120,6 @@ class InforMARLDeepQP(InforMARL):
             safety_key, self.nominal_graph
         )
 
-        self.deep_qp_agent_margin = deep_qp_agent_margin
-        self.deep_qp_obstacle_margin = deep_qp_obstacle_margin
-        self.deep_qp_braking_accel = deep_qp_braking_accel
         self.deep_qp_allow_agent_count_transfer = (
             deep_qp_allow_agent_count_transfer
         )
@@ -155,9 +145,6 @@ class InforMARLDeepQP(InforMARL):
     @property
     def config(self) -> dict:
         return super().config | {
-            "deep_qp_agent_margin": self.deep_qp_agent_margin,
-            "deep_qp_obstacle_margin": self.deep_qp_obstacle_margin,
-            "deep_qp_braking_accel": self.deep_qp_braking_accel,
             "deep_qp_allow_agent_count_transfer": (
                 self.deep_qp_allow_agent_count_transfer
             ),
@@ -172,17 +159,11 @@ class InforMARLDeepQP(InforMARL):
             },
         }
 
-    def safety_constraint(self, graph: GraphsTuple) -> Array:
-        return safety_constraint(
-            self._env,
-            graph,
-            agent_margin=self.deep_qp_agent_margin,
-            obstacle_margin=self.deep_qp_obstacle_margin,
-            braking_accel=self.deep_qp_braking_accel,
-            maximum_margin=self.safety_critic.config.constraint_scale,
-        )
-
     def update(self, rollout: Rollout, step: int) -> dict:
+        # Read the environment-owned constraint before dropping simulator state
+        # from the graphs consumed by the learned networks.
+        bTah_cost = jax.vmap(jax.vmap(self._env.get_cost))(rollout.graph)
+        bTa_constraint = -jnp.max(bTah_cost, axis=-1)
         graph_clean = rollout.graph._replace(env_states=None)
         next_graph_clean = rollout.next_graph._replace(env_states=None)
         rollout = rollout._replace(graph=graph_clean, next_graph=next_graph_clean)
@@ -204,6 +185,7 @@ class InforMARLDeepQP(InforMARL):
                 self.policy_train_state,
                 self.safety_train_state.target_params,
                 rollout,
+                bTa_constraint,
                 batch_idx,
                 rnn_chunk_ids,
                 jnp.asarray(step),
@@ -221,6 +203,7 @@ class InforMARLDeepQP(InforMARL):
             policy_train_state: TrainState,
             safety_params: Params,
             rollout: Rollout,
+            bTa_constraint: Array,
             batch_idx: Array,
             rnn_chunk_ids: Array,
             step: Array,
@@ -266,7 +249,6 @@ class InforMARLDeepQP(InforMARL):
         )
         bTa_task_A = -bT_Al[:, :, None].repeat(self.n_agents, axis=-1)
 
-        bTa_constraint = jax.vmap(jax.vmap(self.safety_constraint))(rollout.graph)
         safety_lambda = safety_lambda_at(
             self.safety_critic.config, self.safety_train_state.online.step
         )
@@ -330,12 +312,7 @@ class InforMARLDeepQP(InforMARL):
         return Vl_train_state, policy_train_state, info
 
     def _checkpoint_metadata(self) -> dict:
-        return safety_constraint_metadata(
-            self._env,
-            agent_margin=self.deep_qp_agent_margin,
-            obstacle_margin=self.deep_qp_obstacle_margin,
-            braking_accel=self.deep_qp_braking_accel,
-        )
+        return environment_cost_metadata(self._env)
 
     def save_safety_checkpoint(self, path: str | Path) -> None:
         self.safety_critic.save_checkpoint(

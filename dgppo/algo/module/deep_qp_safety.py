@@ -14,12 +14,52 @@ import jax.tree_util as jtu
 import optax
 from flax.training.train_state import TrainState
 
+from ...env.base import MultiAgentEnv
+from ...env.vmas.vmas_navigation import VMASNavigation
 from ...nn.gnn import GraphTransformerGNN
 from ...nn.mlp import MLP
 from ...nn.utils import default_nn_init
 from ...trainer.data import SafetyBatch
 from ...utils.graph import GraphsTuple
 from ...utils.typing import Action, Array, Params, PRNGKey
+
+
+def environment_cost_metadata(env: MultiAgentEnv) -> dict[str, Any]:
+    """Checkpoint identity for Graph-HJ trained from ``env.get_cost``."""
+    action_lower, action_upper = env.action_lim()
+    metadata = {
+        "cost_source": "env.get_cost",
+        "cost_reduction": "negative_max",
+        "env_class": type(env).__name__,
+        "state_dim": env.state_dim,
+        "node_dim": env.node_dim,
+        "edge_dim": env.edge_dim,
+        "action_dim": env.action_dim,
+        "n_agents": env.num_agents,
+        "n_obs": env.params.get("n_obs", 0),
+        "n_rays": env.params.get("n_rays"),
+        "top_k_rays": env.params.get("top_k_rays"),
+        "dt": env.dt,
+        "area_size": env.area_size,
+        "comm_radius": env.params.get("comm_radius"),
+        "cost_components": tuple(env.cost_components),
+        "action_lower": tuple(float(x) for x in action_lower.tolist()),
+        "action_upper": tuple(float(x) for x in action_upper.tolist()),
+    }
+    for name in ("car_radius", "obstacle_radius", "obs_radius"):
+        if name in env.params:
+            metadata[name] = env.params[name]
+    if hasattr(env, "agent_radius"):
+        metadata["agent_radius"] = env.agent_radius
+    return metadata
+
+
+def graph_hj_node_feature_mask(env: MultiAgentEnv) -> Array:
+    """Select safety-state node features while excluding task goals."""
+    mask = jnp.ones((env.node_dim,), dtype=bool)
+    if isinstance(env, VMASNavigation):
+        mask = mask.at[4:6].set(False)
+    return mask
 
 
 @dataclass(frozen=True)

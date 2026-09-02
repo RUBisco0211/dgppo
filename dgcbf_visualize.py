@@ -45,7 +45,6 @@ from PIL import Image
 from dgppo.algo import make_algo
 from dgppo.env import make_env
 from dgppo.env.lidar_env.base import LidarEnv, LidarEnvState
-from dgppo.env.safety_constraint import safety_constraint
 
 
 DEFAULT_DGPPO_DIR = Path("logs/LidarSpread/dgppo/seed0_707102621_YGIV")
@@ -279,18 +278,11 @@ def _make_grid_evaluator(
         lidar_data = env.get_lidar_data(agents, obstacles)
         graph = env.get_graph(env_state, lidar_data)
         raw_vh, _ = algo.Vh.get_value(vh_params, graph, rnn_state)
-        clearance = safety_constraint(
-            env,
-            graph,
-            agent_margin=0.0,
-            obstacle_margin=0.0,
-            braking_accel=None,
-            maximum_margin=env.params["comm_radius"],
-        )
+        native_cost = env.get_cost(graph)
         return jnp.stack(
             [
                 _safe_value(raw_vh[ego_agent], cost_channel),
-                clearance[ego_agent],
+                _safe_value(native_cost[ego_agent], cost_channel),
                 raw_vh[ego_agent, 0],
                 raw_vh[ego_agent, 1],
             ]
@@ -544,7 +536,7 @@ def _render_frame(
         0.985,
         (
             f"ego agent {ego_agent} | frame {frame_idx:02d}\n"
-            f"h={actual_value:+.4f}, clearance={actual_clearance:+.4f}\n"
+            f"h={actual_value:+.4f}, env constraint={actual_clearance:+.4f}\n"
             f"raw Vh(agent/obs)={actual_channels[0]:+.3f}/"
             f"{actual_channels[1]:+.3f}\n"
             f"channel={cost_channel}, RNN={rnn_state_mode}"
@@ -568,7 +560,7 @@ def _render_frame(
         -0.10,
         (
             f"scene policy: {policy_label}; black: learned h=0; "
-            "gray dashed: geometric clearance=0"
+            "gray dashed: -env.get_cost=0"
         ),
         transform=ax.transAxes,
         ha="center",

@@ -123,6 +123,26 @@ class InforMARLDeepQPTest(unittest.TestCase):
             deep_qp_hidden_dim=16,
             deep_qp_hidden_layers=1,
         )
+        graph = env.reset(jr.PRNGKey(4))
+        action = jnp.zeros((env.num_agents, env.action_dim))
+        _, _, dgppo_rollout_cost, _, _ = env.step(graph, action)
+        np.testing.assert_array_equal(
+            -jnp.max(env.get_cost(graph), axis=-1),
+            -jnp.max(dgppo_rollout_cost, axis=-1),
+        )
+        self.assertEqual(
+            algo._checkpoint_metadata()["cost_source"],
+            "env.get_cost",
+        )
+        self.assertEqual(
+            algo._checkpoint_metadata()["cost_reduction"],
+            "negative_max",
+        )
+        self.assertEqual(algo._checkpoint_metadata()["n_rays"], 8)
+        self.assertEqual(
+            algo._checkpoint_metadata()["cost_components"],
+            env.cost_components,
+        )
         rollout = algo.collect(algo.params, jr.split(jr.PRNGKey(5), 1))
         info = algo.update(rollout, step=0)
         self.assertEqual(rollout.actions.shape, (1, 4, 2, 2))

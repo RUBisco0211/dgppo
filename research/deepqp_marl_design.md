@@ -297,8 +297,10 @@ python train.py --env LidarSpread --algo deepqp -n 3 --obs 3
 - `--deep-qp-lambda-final`
 - `--deep-qp-lambda-decay-steps`
 - `--deep-qp-constraint-scale`
-- `--deep-qp-agent-margin`
-- `--deep-qp-obstacle-margin`
+
+Graph-HJ 不定义额外的几何 margin。第一阶段直接读取环境的
+`env.get_cost(graph)`；由于环境 cost 是 unsafe-positive 且含多个通道，
+存入 Graph-HJ replay 的标量为 `-max(cost_channels)`。
 
 第一阶段的采样与优化参数使用 `--deep-qp-pretrain-*` 参数组，包括 environment 数、rollout 长度、warmup、batch size、replay size、更新次数以及保存/评估间隔。
 
@@ -476,7 +478,6 @@ $$
 
 ### 8.5 代码组织
 
-- `dgppo/env/safety_constraint.py`：只读图状态的连续安全 margin。
 - `dgppo/algo/module/deep_qp_safety.py`：Graph-HJ 网络、联合方向导数、Deep-QP loss、checkpoint。
 - `dgppo/trainer/safety_buffer.py`：离线 HJ replay。
 - `train_safety_filter.py`：独立 off-policy critic 预训练。

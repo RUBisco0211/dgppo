@@ -8,11 +8,14 @@ import jax.random as jr
 import jax.tree_util as jtu
 import numpy as np
 
-from dgppo.algo.module.deep_qp_safety import DeepQPSafetyConfig, GraphHJSafetyCritic
+from dgppo.algo.module.deep_qp_safety import (
+    DeepQPSafetyConfig,
+    GraphHJSafetyCritic,
+    environment_cost_metadata,
+    graph_hj_node_feature_mask,
+)
 from dgppo.env.safety_constraint import (
     safety_constraint,
-    safety_constraint_metadata,
-    safety_node_feature_mask,
     vmas_navigation_safety_constraint,
 )
 from dgppo.env.lidar_env.lidar_target import LidarTarget
@@ -23,6 +26,7 @@ from dgppo.env.vmas.vmas_navigation_obs import (
 )
 from dgppo.trainer.data import SafetyBatch
 from dgppo.trainer.safety_buffer import SafetyReplayBuffer
+from train_safety_filter import _make_collector
 
 
 def _env_and_graph():
@@ -36,6 +40,19 @@ def _env_and_graph():
 
 
 class SafetyConstraintTest(unittest.TestCase):
+    def test_graph_hj_collector_uses_lidar_environment_cost_exactly(self):
+        params = LidarTarget.PARAMS.copy()
+        params["n_obs"] = 1
+        params["n_rays"] = 8
+        env = LidarTarget(num_agents=2, max_step=2, params=params)
+        batch = _make_collector(env, n_env=2, rollout_steps=2)(
+            jr.PRNGKey(19)
+        )
+        expected = jax.vmap(
+            lambda graph: -jnp.max(env.get_cost(graph), axis=-1)
+        )(batch.graph)
+        np.testing.assert_array_equal(batch.constraints, expected)
+
     def test_lidar_constraint_uses_only_graph_observation(self):
         params = LidarTarget.PARAMS.copy()
         params["n_obs"] = 1
@@ -86,7 +103,7 @@ class GraphHJSafetyCriticTest(unittest.TestCase):
             lower,
             upper,
             self.config,
-            node_feature_mask=safety_node_feature_mask(self.env),
+            node_feature_mask=graph_hj_node_feature_mask(self.env),
         )
         self.state = self.critic.initialize(jr.PRNGKey(0), self.graph)
 
@@ -160,12 +177,7 @@ class GraphHJSafetyCriticTest(unittest.TestCase):
         )
 
     def test_checkpoint_agent_count_transfer_is_eval_only_opt_in(self):
-        source_metadata = safety_constraint_metadata(
-            self.env,
-            agent_margin=0.02,
-            obstacle_margin=0.02,
-            braking_accel=None,
-        )
+        source_metadata = environment_cost_metadata(self.env)
         target_env = VMASNavigation(
             num_agents=3,
             max_step=4,
@@ -179,15 +191,10 @@ class GraphHJSafetyCriticTest(unittest.TestCase):
             lower,
             upper,
             self.config,
-            node_feature_mask=safety_node_feature_mask(target_env),
+            node_feature_mask=graph_hj_node_feature_mask(target_env),
         )
         target_state = target_critic.initialize(jr.PRNGKey(12), target_graph)
-        target_metadata = safety_constraint_metadata(
-            target_env,
-            agent_margin=0.02,
-            obstacle_margin=0.02,
-            braking_accel=None,
-        )
+        target_metadata = environment_cost_metadata(target_env)
 
         with tempfile.TemporaryDirectory() as directory:
             checkpoint = Path(directory) / "deep_qp_safety.pkl"
@@ -226,12 +233,7 @@ class GraphHJSafetyCriticTest(unittest.TestCase):
         self.assertEqual(certificate.coefficient.shape, (3, 3, 2))
 
     def test_checkpoint_obstacle_count_transfer_is_eval_only_opt_in(self):
-        source_metadata = safety_constraint_metadata(
-            self.env,
-            agent_margin=0.02,
-            obstacle_margin=0.02,
-            braking_accel=None,
-        )
+        source_metadata = environment_cost_metadata(self.env)
         target_metadata = source_metadata | {
             "n_obs": source_metadata["n_obs"] + 2
         }

@@ -46,15 +46,12 @@ from dgppo.algo import make_algo
 from dgppo.algo.module.deep_qp_safety import (
     DeepQPSafetyConfig,
     GraphHJSafetyCritic,
+    environment_cost_metadata,
+    graph_hj_node_feature_mask,
     safety_lambda_at,
 )
 from dgppo.env import make_env
 from dgppo.env.lidar_env.base import LidarEnv, LidarEnvState
-from dgppo.env.safety_constraint import (
-    safety_constraint,
-    safety_constraint_metadata,
-    safety_node_feature_mask,
-)
 
 
 DEFAULT_DEEP_QP_CHECKPOINT = Path("logs/LidarSpread/deepqp")
@@ -135,16 +132,16 @@ def _load_safety_critic(
         action_lower=action_lower,
         action_upper=action_upper,
         config=config,
-        node_feature_mask=safety_node_feature_mask(env),
+        node_feature_mask=graph_hj_node_feature_mask(env),
     )
     state = critic.initialize(jr.PRNGKey(1), init_graph)
     metadata = payload["metadata"]
-    expected_metadata = safety_constraint_metadata(
-        env,
-        agent_margin=float(metadata["agent_margin"]),
-        obstacle_margin=float(metadata["obstacle_margin"]),
-        braking_accel=metadata.get("braking_accel"),
-    )
+    if metadata.get("cost_source") != "env.get_cost":
+        raise ValueError(
+            "this visualization only accepts Graph-HJ checkpoints trained "
+            "directly from env.get_cost; retrain the supplied checkpoint"
+        )
+    expected_metadata = environment_cost_metadata(env)
     state = critic.load_checkpoint(
         state,
         checkpoint,
@@ -318,13 +315,9 @@ def _make_grid_evaluator(
     critic: GraphHJSafetyCritic,
     params,
     safety_lambda: float,
-    checkpoint_metadata: dict[str, Any],
     ego_agent: int,
 ) -> Callable:
     config = critic.config
-    agent_margin = float(checkpoint_metadata["agent_margin"])
-    obstacle_margin = float(checkpoint_metadata["obstacle_margin"])
-    braking_accel = checkpoint_metadata.get("braking_accel")
 
     def evaluate_one(
         xy: jax.Array,
@@ -336,14 +329,7 @@ def _make_grid_evaluator(
         env_state = LidarEnvState(agents, goals, obstacles)
         lidar_data = env.get_lidar_data(agents, obstacles)
         graph = env.get_graph(env_state, lidar_data)
-        constraint = safety_constraint(
-            env,
-            graph,
-            agent_margin=agent_margin,
-            obstacle_margin=obstacle_margin,
-            braking_accel=braking_accel,
-            maximum_margin=config.constraint_scale,
-        )
+        constraint = -jnp.max(env.get_cost(graph), axis=-1)
         certificate = critic.certify(params, graph, constraint, safety_lambda)
         return jnp.stack(
             [
@@ -554,7 +540,7 @@ def _render_frame(
         bbox={"facecolor": "white", "alpha": 0.82, "edgecolor": "#777777"},
         zorder=20,
     )
-    ax.set_title("Pretrained Deep-QP HJ Value (ego position projected to x-y)")
+    ax.set_title("Pretrained Deep-QP HJ Value (source: env.get_cost)")
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     ax.set_xlim(0.0, env.area_size)
@@ -648,7 +634,6 @@ def visualize(args: argparse.Namespace) -> list[Path]:
             critic,
             params,
             safety_lambda,
-            payload["metadata"],
             ego,
         )
         for ego in ego_agents
@@ -689,6 +674,7 @@ def visualize(args: argparse.Namespace) -> list[Path]:
         f"eval_agents={env.num_agents}, "
         f"source_obs={payload['metadata'].get('n_obs')}, "
         f"eval_obs={env.params['n_obs']}, "
+        "cost_source=env.get_cost, "
         f"lambda={safety_lambda:.8f}, value_limit=±{value_limit:.5f}",
         flush=True,
     )
