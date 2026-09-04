@@ -51,7 +51,13 @@ def test(args):
     model_path = os.path.join(path, "models")
     if args.step is None:
         models = os.listdir(model_path)
-        step = max([int(model) for model in models if model.isdigit()])
+        if "latest" in models:
+            step = "latest"
+        else:
+            numeric_steps = [int(model) for model in models if model.isdigit()]
+            if not numeric_steps:
+                raise FileNotFoundError(f"no checkpoints found in {model_path}")
+            step = max(numeric_steps)
     else:
         step = args.step
     print("step: ", step)
@@ -97,6 +103,34 @@ def test(args):
         hj_cbf_eps=getattr(config, "hj_cbf_eps", 0.0),
         cbf_weight=getattr(config, "cbf_weight", 1.0),
         cbf_schedule=getattr(config, "cbf_schedule", True),
+        gcbf_gnn_layers=getattr(config, "gcbf_gnn_layers", 1),
+        gcbf_batch_size=getattr(config, "gcbf_batch_size", 256),
+        gcbf_buffer_size=max(
+            getattr(config, "gcbf_buffer_size", 65_536),
+            getattr(config, "gcbf_batch_size", 256),
+        ),
+        gcbf_horizon=getattr(config, "gcbf_horizon", 32),
+        gcbf_inner_epoch=getattr(config, "gcbf_inner_epoch", 8),
+        gcbf_lr_actor=getattr(config, "gcbf_lr_actor", 3e-5),
+        gcbf_lr_cbf=getattr(config, "gcbf_lr_cbf", 3e-5),
+        gcbf_alpha=getattr(config, "gcbf_alpha", 1.0),
+        gcbf_eps=getattr(config, "gcbf_eps", 0.02),
+        gcbf_loss_action_coef=getattr(
+            config, "gcbf_loss_action_coef", 1e-4
+        ),
+        gcbf_loss_unsafe_coef=getattr(
+            config, "gcbf_loss_unsafe_coef", 1.0
+        ),
+        gcbf_loss_safe_coef=getattr(config, "gcbf_loss_safe_coef", 1.0),
+        gcbf_loss_h_dot_coef=getattr(
+            config, "gcbf_loss_h_dot_coef", 0.01
+        ),
+        gcbf_target_tau=getattr(config, "gcbf_target_tau", 0.5),
+        gcbf_qp_relax_penalty=getattr(
+            config, "gcbf_qp_relax_penalty", 1e3
+        ),
+        gcbf_qp_chunk_size=getattr(config, "gcbf_qp_chunk_size", 32),
+        gcbf_unsafe_fraction=getattr(config, "gcbf_unsafe_fraction", 0.5),
     )
     algo.load(model_path, step)
     if args.stochastic:
@@ -190,7 +224,9 @@ def main():
     # custom arguments
     parser.add_argument("--no-video", action="store_true", default=False)
     parser.add_argument("--epi", type=int, default=5)
-    parser.add_argument("--step", type=int, default=None)
+    parser.add_argument(
+        "--step", default=None, help="checkpoint directory name; defaults to latest"
+    )
     parser.add_argument("--obs", type=int, default=None)
     parser.add_argument("--stochastic", action="store_true", default=False)
     parser.add_argument("--full-observation", action="store_true", default=False)

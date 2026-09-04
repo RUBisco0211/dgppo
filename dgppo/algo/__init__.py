@@ -5,6 +5,7 @@ from .informarl_deep_qp import InforMARLDeepQP
 from .informarl_lagr import InforMARLLagr
 from .dgppo import DGPPO
 from .hcbfcrpo import HCBFCRPO
+from .gcbf_plus import GCBFPlus
 
 
 def make_algo(algo: str, **kwargs) -> Algorithm:
@@ -20,5 +21,7 @@ def make_algo(algo: str, **kwargs) -> Algorithm:
         return DGPPO(**kwargs)
     elif algo == 'hcbfcrpo':
         return HCBFCRPO(**kwargs)
+    elif algo in ('gcbf+', 'gcbfplus'):
+        return GCBFPlus(**kwargs)
     else:
         raise ValueError(f'Unknown algorithm: {algo}')

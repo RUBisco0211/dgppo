@@ -168,6 +168,23 @@ def _train_rl(args):
         hj_cbf_alpha=args.hj_cbf_alpha,
         hj_cbf_margin=args.hj_cbf_margin,
         hj_cbf_eps=args.hj_cbf_eps,
+        gcbf_gnn_layers=args.gcbf_gnn_layers,
+        gcbf_batch_size=args.gcbf_batch_size,
+        gcbf_buffer_size=args.gcbf_buffer_size,
+        gcbf_horizon=args.gcbf_horizon,
+        gcbf_inner_epoch=args.gcbf_inner_epoch,
+        gcbf_lr_actor=args.gcbf_lr_actor,
+        gcbf_lr_cbf=args.gcbf_lr_cbf,
+        gcbf_alpha=args.gcbf_alpha,
+        gcbf_eps=args.gcbf_eps,
+        gcbf_loss_action_coef=args.gcbf_loss_action_coef,
+        gcbf_loss_unsafe_coef=args.gcbf_loss_unsafe_coef,
+        gcbf_loss_safe_coef=args.gcbf_loss_safe_coef,
+        gcbf_loss_h_dot_coef=args.gcbf_loss_h_dot_coef,
+        gcbf_target_tau=args.gcbf_target_tau,
+        gcbf_qp_relax_penalty=args.gcbf_qp_relax_penalty,
+        gcbf_qp_chunk_size=args.gcbf_qp_chunk_size,
+        gcbf_unsafe_fraction=args.gcbf_unsafe_fraction,
     )
 
     start_step = 0
@@ -446,6 +463,25 @@ def main():
     parser.add_argument("--hj-cbf-alpha", type=float, default=1.0)
     parser.add_argument("--hj-cbf-margin", type=float, default=0.0)
     parser.add_argument("--hj-cbf-eps", type=float, default=0.0)
+
+    # GCBF+ actor/CBF joint-training arguments
+    parser.add_argument("--gcbf-gnn-layers", type=int, default=1)
+    parser.add_argument("--gcbf-batch-size", type=int, default=256)
+    parser.add_argument("--gcbf-buffer-size", type=int, default=65536)
+    parser.add_argument("--gcbf-horizon", type=int, default=32)
+    parser.add_argument("--gcbf-inner-epoch", type=int, default=8)
+    parser.add_argument("--gcbf-lr-actor", type=float, default=3e-5)
+    parser.add_argument("--gcbf-lr-cbf", type=float, default=3e-5)
+    parser.add_argument("--gcbf-alpha", type=float, default=1.0)
+    parser.add_argument("--gcbf-eps", type=float, default=0.02)
+    parser.add_argument("--gcbf-loss-action-coef", type=float, default=1e-4)
+    parser.add_argument("--gcbf-loss-unsafe-coef", type=float, default=1.0)
+    parser.add_argument("--gcbf-loss-safe-coef", type=float, default=1.0)
+    parser.add_argument("--gcbf-loss-h-dot-coef", type=float, default=0.01)
+    parser.add_argument("--gcbf-target-tau", type=float, default=0.5)
+    parser.add_argument("--gcbf-qp-relax-penalty", type=float, default=1e3)
+    parser.add_argument("--gcbf-qp-chunk-size", type=int, default=32)
+    parser.add_argument("--gcbf-unsafe-fraction", type=float, default=0.5)
 
     # NN arguments
     parser.add_argument("--actor-gnn-layers", type=int, default=2)

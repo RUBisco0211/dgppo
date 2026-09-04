@@ -41,3 +41,12 @@ class SafetyBatch(NamedTuple):
     next_graph: GraphsTuple
     next_constraints: Array
     dones: Done
+
+
+class GCBFTransitionBatch(NamedTuple):
+    """Transitions and horizon labels consumed by GCBF+ updates."""
+
+    graph: GraphsTuple
+    next_graph: GraphsTuple
+    safe_mask: Array
+    unsafe_mask: Array

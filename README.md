@@ -122,6 +122,11 @@ It is very easy to create a custom environment by yourself! Choose one of the th
 We provide the following algorithms:
 
 - `dgppo`: Discrete GCBF Proximal Policy Optimization.
+- `gcbf+` (alias `gcbfplus`): joint GCBF certificate and deterministic safety-policy
+  training for every `LidarEnv` and VMAS environment in this repository. It keeps
+  the original GCBF+ classification, derivative, target-network, replay, and QP
+  imitation losses, while using a one-step environment linearization as the QP
+  dynamics interface.
 - `informarl`: [MAPPO](https://github.com/marlbenchmark/on-policy) with GNN ([Scalable Multi-Agent Reinforcement Learning through Intelligent Information Aggregation](https://github.com/nsidn98/InforMARL/)).
 - `informarl_lagr`: [MAPPO-Lagrangian](https://github.com/chauncygu/Multi-Agent-Constrained-Policy-Optimisation) with GNN. Replaced the sum-over-time cost with max-over-time cost.
 - `deepqp`: Two-stage method that first pretrains the distributed Graph-HJ critic, then freezes it and applies DGPPO-style per-sample task/safety advantage mixing. It does not apply a runtime QP. See the [unified Deep-QP design and training document](research/deepqp_marl_design.md).
@@ -135,6 +140,31 @@ To train the `<algo>` algorithm on the `<env>` environment with `<n_agent>` agen
 ```bash
 python train.py --env <env> --algo <algo> -n <n_agent> --obs <n_obs>
 ```
+
+For example, train the full GCBF+ actor/CBF pipeline on either environment family:
+
+```bash
+python train.py --env LidarSpread --algo gcbf+ -n 3 --obs 3
+python train.py --env VMASNavigationObs --algo gcbf+ -n 3 --obs 3
+```
+
+GCBF+ hyperparameters are exposed through the `--gcbf-*` flags. In particular,
+`--gcbf-batch-size`, `--gcbf-buffer-size`, `--gcbf-inner-epoch`, and
+`--gcbf-qp-chunk-size` control the replay/update workload. The generic
+`--batch-size` flag remains the rollout batching option used by the shared trainer.
+
+Render safe-positive learned CBF contours (solid black `h=0`) together with the
+environment collision boundary (dashed grey) from a saved run:
+
+```bash
+python gcbfplus_visualize.py \
+  --gcbfplus-dir logs/LidarSpread/gcbf+/seed0_<run> \
+  --ego-agents all --show-goals
+```
+
+The contour tool supports the same Lidar and VMAS environments and can roll out
+the saved actor, the nominal controller, random controls, or zero controls via
+`--policy-mode`.
 
 Run the complete Graph-HJ pretraining and constrained InforMARL pipeline with:
 

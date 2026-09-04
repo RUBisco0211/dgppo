@@ -21,6 +21,7 @@ rich>=13.7.0
 pyyaml>=6.0.1
 opencv-python>=4.9.0
 mediapy>=1.2.2
+jaxproxqp @ git+https://github.com/oswinso/jaxproxqp.git
 mujoco>=3.2.2
 mujoco-mjx
 numpy==1.26.4
