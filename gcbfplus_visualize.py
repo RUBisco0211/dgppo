@@ -1,4 +1,4 @@
-"""Render ego-centric contours for a trained GCBF+ certificate.
+"""Render ego-centric contours for a trained GCBF or GCBF+ certificate.
 
 Blue/positive values are predicted safe and red/negative values are predicted
 unsafe.  The solid black curve is the learned ``h=0`` contour; the dashed grey
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import pickle
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -57,9 +58,9 @@ def _load_config(run_dir: Path) -> Any:
         raise FileNotFoundError(f"GCBF+ config not found: {path}")
     with path.open("r", encoding="utf-8") as file:
         config = yaml.load(file, Loader=yaml.UnsafeLoader)
-    if _cfg_get(config, "algo") not in ("gcbf+", "gcbfplus"):
+    if _cfg_get(config, "algo") not in ("gcbf", "gcbf+", "gcbfplus"):
         raise ValueError(
-            "gcbfplus_visualize.py requires a GCBF+ run, got "
+            "gcbfplus_visualize.py requires a GCBF/GCBF+ run, got "
             f"algo={_cfg_get(config, 'algo')!r}"
         )
     return config
@@ -308,6 +309,7 @@ def _render_frame(
     ego_agent,
     frame_index,
     value_limit,
+    certificate_label,
     policy_label,
     args,
 ) -> Image.Image:
@@ -337,7 +339,9 @@ def _render_frame(
     xmin, xmax, ymin, ymax = algo.adapter.plot_bounds
     ax.set(xlim=(xmin, xmax), ylim=(ymin, ymax), xlabel="x", ylabel="y")
     ax.set_aspect("equal", adjustable="box")
-    ax.set_title(f"GCBF+ certificate | ego {ego_agent} | frame {frame_index:02d}")
+    ax.set_title(
+        f"{certificate_label} certificate | ego {ego_agent} | frame {frame_index:02d}"
+    )
     ax.text(
         0.5,
         -0.10,
@@ -381,9 +385,26 @@ def visualize(args: argparse.Namespace) -> list[Path]:
     algo = _make_algo(config, env)
     models_dir = run_dir / "models"
     step = _resolve_step(models_dir, args.step)
-    algo.load(str(models_dir), step)
-    action_fn, policy_label = _make_action_source(args.policy_mode, algo, env, args.seed)
-    snapshots = _collect_snapshots(env, action_fn, args.policy_mode, args)
+    checkpoint_dir = models_dir / step
+    cbf_only = _cfg_get(config, "training_mode") == "cbf_only"
+    certificate_label = "GCBF" if cbf_only else "GCBF+"
+    policy_mode = args.policy_mode
+    if cbf_only:
+        with (checkpoint_dir / "cbf.pkl").open("rb") as file:
+            cbf_params = pickle.load(file)
+        algo.cbf_train_state = algo.cbf_train_state.replace(params=cbf_params)
+        algo.cbf_target_params = jax.tree.map(jnp.copy, cbf_params)
+        if policy_mode == "checkpoint":
+            policy_mode = "nominal"
+            print(
+                "CBF-only checkpoint has no actor; using the nominal controller "
+                "for scene rollout.",
+                flush=True,
+            )
+    else:
+        algo.load(str(models_dir), step)
+    action_fn, policy_label = _make_action_source(policy_mode, algo, env, args.seed)
+    snapshots = _collect_snapshots(env, action_fn, policy_mode, args)
 
     xmin, xmax, ymin, ymax = algo.adapter.plot_bounds
     x_axis = np.linspace(xmin, xmax, args.grid_size, dtype=np.float32)
@@ -428,6 +449,7 @@ def visualize(args: argparse.Namespace) -> list[Path]:
                 agent,
                 frame_index,
                 value_limit,
+                certificate_label,
                 policy_label,
                 args,
             )
@@ -442,7 +464,7 @@ def visualize(args: argparse.Namespace) -> list[Path]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Render GCBF+ certificate contours")
+    parser = argparse.ArgumentParser(description="Render GCBF/GCBF+ certificate contours")
     parser.add_argument("--gcbfplus-dir", type=Path, required=True)
     parser.add_argument("--step", default=None, help="checkpoint directory name; defaults to latest")
     parser.add_argument("--policy-mode", choices=("checkpoint", "nominal", "random", "zero"), default="checkpoint")

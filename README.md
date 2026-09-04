@@ -166,6 +166,22 @@ The contour tool supports the same Lidar and VMAS environments and can roll out
 the saved actor, the nominal controller, random controls, or zero controls via
 `--policy-mode`.
 
+To train only the GCBF certificate on a Lidar environment, without creating or
+updating an actor/policy network, use the standalone entry point:
+
+```bash
+python train_gcbf.py --env LidarSpread -n 3 --obs 3
+```
+
+Its defaults follow the original `gcbfplus/train.py` settings: 1 GNN layer,
+batch size 256, buffer size 512 rollouts, horizon 32, 8 inner epochs, 16 training
+environments, 32 evaluation environments, CBF learning rate `3e-5`, `alpha=1`,
+`eps=0.02`, and derivative-loss coefficient `0.01`. Since no policy is learned,
+a fixed mixture of nominal and random controls supplies exploratory transitions.
+The resulting `logs/<env>/gcbf/...` checkpoint can be passed directly to
+`gcbfplus_visualize.py`; its scene rollout automatically uses the nominal
+controller.
+
 Run the complete Graph-HJ pretraining and constrained InforMARL pipeline with:
 
 ```bash
