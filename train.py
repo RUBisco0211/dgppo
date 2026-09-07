@@ -185,6 +185,12 @@ def _train_rl(args):
         gcbf_qp_relax_penalty=args.gcbf_qp_relax_penalty,
         gcbf_qp_chunk_size=args.gcbf_qp_chunk_size,
         gcbf_unsafe_fraction=args.gcbf_unsafe_fraction,
+        adv_gnn_layers=args.adv_gnn_layers,
+        adv_hidden_dim=args.adv_hidden_dim,
+        adv_inner_steps=args.adv_inner_steps,
+        adv_target_tau=args.adv_target_tau,
+        safety_gamma=args.safety_gamma,
+        cbf_kappa=args.cbf_kappa,
     )
 
     start_step = 0
@@ -482,6 +488,15 @@ def main():
     parser.add_argument("--gcbf-qp-relax-penalty", type=float, default=1e3)
     parser.add_argument("--gcbf-qp-chunk-size", type=int, default=32)
     parser.add_argument("--gcbf-unsafe-fraction", type=float, default=0.5)
+
+    # adversarial DGCBF + DGPPO arguments.  Defaults follow DGPPO where an
+    # equivalent hyperparameter exists.
+    parser.add_argument("--adv-gnn-layers", type=int, default=None)
+    parser.add_argument("--adv-hidden-dim", type=int, default=64)
+    parser.add_argument("--adv-inner-steps", type=int, default=1)
+    parser.add_argument("--adv-target-tau", type=float, default=0.005)
+    parser.add_argument("--safety-gamma", type=float, default=0.99)
+    parser.add_argument("--cbf-kappa", type=float, default=None)
 
     # NN arguments
     parser.add_argument("--actor-gnn-layers", type=int, default=2)
