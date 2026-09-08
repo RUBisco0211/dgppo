@@ -39,7 +39,7 @@
 - 实现中使用 $\gamma_s=0.99$；理论本身不定义折扣，无折扣参照在实现中对应 $\gamma_s=1$ 分支；
 - 任务 reward discount 与 safety discount 分开配置；
 - 以 DGPPO 式 robust residual PPO 作为首个可运行主分支，同一共享 critic checkpoint 上的三路消融用于决定最终方案。
-- 当前代码先完成固定图/核心 actor-update 验证；compact-support gate 和五类动态转移训练仍待阶段 II 实现。
+- 当前代码使用环境的有限感知动态图完成核心 actor-update 验证；compact-support gate 和五类动态转移训练仍待阶段 II 实现。
 
 ## 仍需实验回答的问题
 

@@ -189,6 +189,9 @@ def _train_rl(args):
         adv_hidden_dim=args.adv_hidden_dim,
         adv_inner_steps=args.adv_inner_steps,
         adv_target_tau=args.adv_target_tau,
+        adv_batch_size=args.adv_batch_size,
+        adv_task_sample_ratio=args.adv_task_sample_ratio,
+        adv_actor_egos_per_sample=args.adv_actor_egos_per_sample,
         safety_gamma=args.safety_gamma,
         cbf_kappa=args.cbf_kappa,
     )
@@ -495,6 +498,9 @@ def main():
     parser.add_argument("--adv-hidden-dim", type=int, default=64)
     parser.add_argument("--adv-inner-steps", type=int, default=1)
     parser.add_argument("--adv-target-tau", type=float, default=0.005)
+    parser.add_argument("--adv-batch-size", type=int, default=4096)
+    parser.add_argument("--adv-task-sample-ratio", type=float, default=0.25)
+    parser.add_argument("--adv-actor-egos-per-sample", type=int, default=1)
     parser.add_argument("--safety-gamma", type=float, default=0.99)
     parser.add_argument("--cbf-kappa", type=float, default=None)
 

@@ -66,6 +66,23 @@ def jax_relu(value: Array) -> Array:
     return jnp.maximum(value, 0.0)
 
 
+def sample_transition_indices(
+    key: Array,
+    population_size: int,
+    sample_size: int,
+) -> Array:
+    """Sample a minibatch without shuffling the full rollout index array."""
+    if sample_size == population_size:
+        return jnp.arange(population_size, dtype=jnp.int32)
+    return jr.randint(
+        key,
+        shape=(sample_size,),
+        minval=0,
+        maxval=population_size,
+        dtype=jnp.int32,
+    )
+
+
 class AdversarialDGPPO(InforMARL):
     """InforMARL PPO with a separately sampled adversarial DGCBF safety game."""
 
@@ -83,6 +100,9 @@ class AdversarialDGPPO(InforMARL):
         adv_hidden_dim: int = 64,
         adv_inner_steps: int = 1,
         adv_target_tau: float = 0.005,
+        adv_batch_size: int = 4096,
+        adv_task_sample_ratio: float = 0.25,
+        adv_actor_egos_per_sample: int = 1,
         safety_gamma: Optional[float] = None,
         cbf_kappa: Optional[float] = None,
         **kwargs,
@@ -92,12 +112,23 @@ class AdversarialDGPPO(InforMARL):
             raise ValueError("adv_inner_steps must be positive")
         if not 0.0 < adv_target_tau <= 1.0:
             raise ValueError("adv_target_tau must be in (0, 1]")
+        if adv_batch_size <= 0:
+            raise ValueError("adv_batch_size must be positive")
+        if not 0.0 < adv_task_sample_ratio <= 1.0:
+            raise ValueError("adv_task_sample_ratio must be in (0, 1]")
+        if not 1 <= adv_actor_egos_per_sample <= self.n_agents:
+            raise ValueError(
+                "adv_actor_egos_per_sample must be between 1 and n_agents"
+            )
         self.adv_gnn_layers = (
             Vh_gnn_layers if adv_gnn_layers is None else adv_gnn_layers
         )
         self.adv_hidden_dim = adv_hidden_dim
         self.adv_inner_steps = adv_inner_steps
         self.adv_target_tau = adv_target_tau
+        self.adv_batch_size = adv_batch_size
+        self.adv_task_sample_ratio = adv_task_sample_ratio
+        self.adv_actor_egos_per_sample = adv_actor_egos_per_sample
         self.safety_gamma = self.gamma if safety_gamma is None else safety_gamma
         if not 0.0 < self.safety_gamma <= 1.0:
             raise ValueError("safety_gamma must be in (0, 1]")
@@ -209,6 +240,9 @@ class AdversarialDGPPO(InforMARL):
             "adv_hidden_dim": self.adv_hidden_dim,
             "adv_inner_steps": self.adv_inner_steps,
             "adv_target_tau": self.adv_target_tau,
+            "adv_batch_size": self.adv_batch_size,
+            "adv_task_sample_ratio": self.adv_task_sample_ratio,
+            "adv_actor_egos_per_sample": self.adv_actor_egos_per_sample,
             "safety_gamma": self.safety_gamma,
             "cbf_kappa": self.cbf_kappa,
             "cbf_eps": self.cbf_eps,
@@ -525,6 +559,7 @@ class AdversarialDGPPO(InforMARL):
         self,
         rollout: Rollout,
         ego_ids: Array,
+        adv_sample_idx: Array,
         task_graph: GraphsTuple,
         task_game_action: Action,
         task_constraint: Array,
@@ -532,18 +567,27 @@ class AdversarialDGPPO(InforMARL):
         task_ego: Array,
     ) -> dict:
         b, t = rollout.dones.shape[:2]
-        flat_graph = jtu.tree_map(merge01, rollout.graph)
-        flat_next_graph = jtu.tree_map(merge01, rollout.next_graph)
-        flat_action = merge01(rollout.actions)
-        flat_ego = jnp.repeat(ego_ids, t)
+        all_graph = jtu.tree_map(merge01, rollout.graph)
+        all_next_graph = jtu.tree_map(merge01, rollout.next_graph)
+        all_action = merge01(rollout.actions)
+        all_ego = jnp.repeat(ego_ids, t)
         constraints = -jnp.max(rollout.costs, axis=-1)
         ego_constraints = jnp.take_along_axis(
             constraints, ego_ids[:, None, None], axis=2
         ).squeeze(2)
         trajectory_minimum = jax.vmap(self._future_minimum)(ego_constraints)
-        flat_constraint = merge01(ego_constraints)
-        flat_trajectory_minimum = merge01(trajectory_minimum)
-        assert flat_constraint.shape == (b * t,)
+        all_constraint = merge01(ego_constraints)
+        all_trajectory_minimum = merge01(trajectory_minimum)
+        assert all_constraint.shape == (b * t,)
+
+        flat_graph = jtu.tree_map(lambda value: value[adv_sample_idx], all_graph)
+        flat_next_graph = jtu.tree_map(
+            lambda value: value[adv_sample_idx], all_next_graph
+        )
+        flat_action = all_action[adv_sample_idx]
+        flat_ego = all_ego[adv_sample_idx]
+        flat_constraint = all_constraint[adv_sample_idx]
+        flat_trajectory_minimum = all_trajectory_minimum[adv_sample_idx]
 
         q_graph = jtu.tree_map(
             lambda adv, task: jnp.concatenate([adv, task], axis=0),
@@ -598,6 +642,7 @@ class AdversarialDGPPO(InforMARL):
             )
             game_info = beta_info | mu_info
         data_info = {
+            "adv_dgcbf/data/adversarial_rollout_samples": jnp.asarray(b * t),
             "adv_dgcbf/data/adversarial_samples": jnp.asarray(flat_constraint.size),
             "adv_dgcbf/data/task_action_samples": jnp.asarray(task_constraint.size),
             "adv_dgcbf/data/task_action_fraction": task_constraint.size
@@ -609,11 +654,12 @@ class AdversarialDGPPO(InforMARL):
         self,
         graph: GraphsTuple,
         task_action: Action,
+        ego_ids: Array,
         q_params: Params,
         vh_params: Params,
         beta_params: Params,
     ) -> tuple[Array, Array]:
-        value = self.adv_vh.get_value(vh_params, graph)
+        all_values = self.adv_vh.get_value(vh_params, graph)
 
         def one_ego(ego_id):
             task_game_action = self._task_game_action(
@@ -623,10 +669,8 @@ class AdversarialDGPPO(InforMARL):
                 q_params, graph, task_game_action, ego_id
             )
 
-        task_value = jax.vmap(one_ego)(
-            jnp.arange(self.n_agents, dtype=jnp.int32)
-        )
-        return value, task_value
+        task_value = jax.vmap(one_ego)(ego_ids)
+        return all_values[ego_ids], task_value
 
     @ft.partial(jax.jit, static_argnums=(0,))
     def _update_task(
@@ -637,6 +681,7 @@ class AdversarialDGPPO(InforMARL):
         vh_params: Params,
         beta_params: Params,
         rollout: Rollout,
+        actor_sample_idx: Array,
         batch_idx: Array,
         rnn_chunk_ids: Array,
         step: Array,
@@ -683,6 +728,18 @@ class AdversarialDGPPO(InforMARL):
 
         flat_graph = jtu.tree_map(merge01, rollout.graph)
         flat_action = merge01(rollout.actions)
+        n_transition = b * t
+        actor_graph = jtu.tree_map(
+            lambda value: value[actor_sample_idx], flat_graph
+        )
+        actor_action = flat_action[actor_sample_idx]
+        actor_ego_ids = (
+            actor_sample_idx[:, None]
+            + jnp.arange(self.adv_actor_egos_per_sample, dtype=jnp.int32)[
+                None, :
+            ]
+            + step
+        ) % self.n_agents
         flat_value, flat_task_value = jax.vmap(
             ft.partial(
                 self._all_actor_safety_values,
@@ -690,16 +747,28 @@ class AdversarialDGPPO(InforMARL):
                 vh_params=lax.stop_gradient(vh_params),
                 beta_params=lax.stop_gradient(beta_params),
             )
-        )(flat_graph, flat_action)
-        safety_value = flat_value.reshape((b, t, self.n_agents))
-        task_action_value = flat_task_value.reshape((b, t, self.n_agents))
-        mixed_advantage, violation, safe = mix_adv_dgcbf_advantages(
-            task_advantage,
-            safety_value,
-            task_action_value,
+        )(actor_graph, actor_action, actor_ego_ids)
+        flat_task_advantage = task_advantage.reshape(
+            (n_transition, self.n_agents)
+        )
+        actor_task_advantage = flat_task_advantage[actor_sample_idx]
+        selected_task_advantage = jnp.take_along_axis(
+            actor_task_advantage, actor_ego_ids, axis=1
+        )
+        selected_advantage, violation, safe = mix_adv_dgcbf_advantages(
+            selected_task_advantage,
+            flat_value,
+            flat_task_value,
             self.cbf_schedule_fn(step),
             self.cbf_kappa,
             self.cbf_eps,
+        )
+        row_ids = actor_sample_idx[:, None]
+        mixed_advantage = flat_task_advantage.at[
+            row_ids, actor_ego_ids
+        ].set(selected_advantage)
+        mixed_advantage = mixed_advantage.reshape(
+            (b, t, self.n_agents)
         )
 
         def update_fn(carry, idx):
@@ -726,15 +795,19 @@ class AdversarialDGPPO(InforMARL):
             batch_idx,
         )
         info = jtu.tree_map(lambda value: value[-1], info)
+        safety_update_ratio = (~safe).sum() / (n_transition * self.n_agents)
         info |= {
             "adv_dgcbf/actor/residual_mean": violation.mean(),
             "adv_dgcbf/actor/residual_max": violation.max(),
             "adv_dgcbf/actor/safe_ratio": safe.mean(),
-            "adv_dgcbf/actor/task_update_ratio": safe.mean(),
-            "adv_dgcbf/actor/safety_update_ratio": 1.0 - safe.mean(),
-            "adv_dgcbf/actor/value_mean": safety_value.mean(),
-            "adv_dgcbf/actor/task_action_value_mean": task_action_value.mean(),
+            "adv_dgcbf/actor/task_update_ratio": 1.0 - safety_update_ratio,
+            "adv_dgcbf/actor/safety_update_ratio": safety_update_ratio,
+            "adv_dgcbf/actor/value_mean": flat_value.mean(),
+            "adv_dgcbf/actor/task_action_value_mean": flat_task_value.mean(),
             "adv_dgcbf/actor/cbf_weight": self.cbf_schedule_fn(step),
+            "adv_dgcbf/data/actor_ego_evaluations": jnp.asarray(safe.size),
+            "adv_dgcbf/data/actor_ego_fraction": safe.size
+            / (n_transition * self.n_agents),
         }
         return Vl_train_state, policy_train_state, info
 
@@ -756,19 +829,55 @@ class AdversarialDGPPO(InforMARL):
         )
 
     def update(self, rollout: Rollout, step: int) -> dict:
-        rollout_key, self.key = jr.split(self.key)
+        (
+            rollout_key,
+            adv_sample_key,
+            task_sample_key,
+            actor_sample_key,
+            self.key,
+        ) = jr.split(self.key, 5)
         n_env = rollout.dones.shape[0]
-        ego_ids = (
+        time_horizon = rollout.dones.shape[1]
+        n_transition = n_env * time_horizon
+        adv_n_env = min(
+            n_env,
+            max(1, (self.adv_batch_size + time_horizon - 1) // time_horizon),
+        )
+        adv_ego_ids = (
+            jnp.arange(adv_n_env, dtype=jnp.int32) + jnp.asarray(step)
+        ) % self.n_agents
+        task_ego_ids = (
             jnp.arange(n_env, dtype=jnp.int32) + jnp.asarray(step)
         ) % self.n_agents
         adv_rollout = self.adv_rollout_fn(
-            self.params, jr.split(rollout_key, n_env), ego_ids
+            self.params, jr.split(rollout_key, adv_n_env), adv_ego_ids
         )
 
-        time_horizon = rollout.dones.shape[1]
-        task_graph = jtu.tree_map(merge01, rollout.graph)
-        task_action = merge01(rollout.actions)
-        task_ego = jnp.repeat(ego_ids, time_horizon)
+        n_adv_transition = adv_n_env * time_horizon
+        adv_sample_size = min(self.adv_batch_size, n_adv_transition)
+        actor_sample_size = min(self.adv_batch_size, n_transition)
+        task_sample_size = min(
+            n_transition,
+            max(1, round(adv_sample_size * self.adv_task_sample_ratio)),
+        )
+        adv_sample_idx = sample_transition_indices(
+            adv_sample_key, n_adv_transition, adv_sample_size
+        )
+        actor_sample_idx = sample_transition_indices(
+            actor_sample_key, n_transition, actor_sample_size
+        )
+        task_sample_idx = sample_transition_indices(
+            task_sample_key, n_transition, task_sample_size
+        )
+
+        all_task_graph = jtu.tree_map(merge01, rollout.graph)
+        all_task_action = merge01(rollout.actions)
+        all_task_ego = jnp.repeat(task_ego_ids, time_horizon)
+        task_graph = jtu.tree_map(
+            lambda value: value[task_sample_idx], all_task_graph
+        )
+        task_action = all_task_action[task_sample_idx]
+        task_ego = all_task_ego[task_sample_idx]
         task_game_action, task_next_graph = self._counterfactual_task_transitions(
             self.adv_beta_train_state.params,
             task_graph,
@@ -777,9 +886,9 @@ class AdversarialDGPPO(InforMARL):
         )
         task_constraints = -jnp.max(rollout.costs, axis=-1)
         task_constraint = jnp.take_along_axis(
-            task_constraints, ego_ids[:, None, None], axis=2
+            task_constraints, task_ego_ids[:, None, None], axis=2
         ).squeeze(2)
-        task_constraint = merge01(task_constraint)
+        task_constraint = merge01(task_constraint)[task_sample_idx]
 
         rollout = rollout._replace(
             graph=rollout.graph._replace(env_states=None),
@@ -812,7 +921,8 @@ class AdversarialDGPPO(InforMARL):
             )
             safety_info = self._update_safety(
                 adv_rollout,
-                ego_ids,
+                adv_ego_ids,
+                adv_sample_idx,
                 task_graph,
                 task_game_action,
                 task_constraint,
@@ -830,6 +940,7 @@ class AdversarialDGPPO(InforMARL):
                 self.adv_vh_train_state.params,
                 self.adv_beta_train_state.params,
                 rollout,
+                actor_sample_idx,
                 batch_idx,
                 rnn_chunk_ids,
                 jnp.asarray(step),

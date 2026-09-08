@@ -42,3 +42,10 @@ python ./dgcbf_visualize.py --dgppo-dir logs/LidarSpread/dgppo/seed0_831102005_K
   --cost-channel worst \
   --ego-agents all \
   --output-dir figures/dgbcf-contour
+
+
+python train.py \
+  --env LidarSpread \
+  -n 3 \
+  --algo adversarial_dgppo \
+  --obs 3

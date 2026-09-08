@@ -255,12 +255,12 @@ $$
 **每轮训练：**
 
 1. **采集任务数据。** 所有 agent 使用 $\pi_\theta$ 采集 stochastic rollout，供 reward critic 与 PPO 使用。
-2. **采集安全数据。** round-robin 选择 ego；ego 使用 $\mu_\eta$，当前可观测邻居使用 $\beta_\psi$，采集新鲜 deterministic on-policy rollout。
+2. **采集安全数据。** round-robin 选择 ego；ego 使用 $\mu_\eta$，当前可观测邻居使用 $\beta_\psi$，采集足以填满独立安全 batch 的新鲜 deterministic on-policy rollout，不强制其与 PPO rollout 环境数相同。
 3. **分类动态图转移。** 把安全数据分为 stable、enter、leave、activate、deactivate，并从边界缓存补足稀有类型。
 4. **构造安全标签。** 训练 target 使用实现折扣 $\gamma_s=0.99$；同时保存无折扣一步 target 和 trajectory minimum 作为理论一致性诊断。
 5. **更新安全 Critic。** 最小化 $L_{\rm safe}$，使 $Q_\phi$ 近似动作条件 discounted safety surrogate，使 $V_\omega$ 对齐其 saddle value 和有限时域最坏裕度。
 6. **更新安全博弈策略。** 每次 critic 更新后，先对 $\beta_\psi$ 做若干最小化内层步，再对 $\mu_\eta$ 做最大化步；动作始终投影到物理范围。
-7. **更新任务策略。** 对 stochastic PPO rollout 中的每个 ego 动作，保留该 ego 动作，令当前可观测邻居使用 $\beta_\psi$ 最坏响应，由 $Q_\phi$ 计算 robust DCBF residual。满足 residual 的样本使用 reward advantage；违反样本改用降低 residual 的 advantage，再进入标准 clipped PPO loss。计算该 advantage 时对 $Q_\phi,\mu_\eta,\beta_\psi$ stop-gradient。
+7. **更新任务策略。** PPO 仍使用完整 stochastic rollout。从其中抽取独立的 actor-safety batch，每个被抽中的 transition 按 round-robin 选择少量 ego；保留 ego 任务动作，令当前可观测邻居使用 $\beta_\psi$ 最坏响应，由 $Q_\phi$ 计算 robust DCBF residual。被抽中且违反 residual 的 ego 改用降低 residual 的 advantage；其余样本保留 reward advantage，统一进入标准 clipped PPO loss。计算该 advantage 时对 $Q_\phi,\mu_\eta,\beta_\psi$ stop-gradient。
 8. **更新与验收。** Polyak 更新 target networks；只有五类 held-out residual、gate invariance 和多起点 adversary 检验均通过阈值时才接受 checkpoint。
 
 **当前阶段输出：**任务策略 $\pi_\theta$、安全选择器候选 $\mu_\eta$、对手 $\beta_\psi$、discounted candidate adversarial DGCBF $V_\omega$ 和动作 Critic $Q_\phi$，以及对应的无折扣验证指标。
@@ -283,10 +283,13 @@ $$
 
 - 算法名为 `adversarial_dgppo`（别名 `adv_dgppo`）；
 - $Q_\phi,V_\omega,\mu_\eta,\beta_\psi$ 都是 agent 间共享参数的前馈 GNN，ego 身份和当前邻居 mask 作为条件；
-- PPO/$V_l$ 使用原有 stochastic task rollout，安全值主体使用独立 deterministic adversarial rollout，并用 task-action counterfactual 转移增强 $Q_\phi$ 的动作覆盖；
+- PPO/$V_l$ 使用原有完整 stochastic task rollout，安全值主体使用独立 deterministic adversarial rollout，并用抽样的 task-action counterfactual 转移增强 $Q_\phi$ 的动作覆盖；
+- 默认 `--adv-batch-size=4096`；安全 rollout、安全网络更新和 actor residual 都不超过该 transition 预算，但 PPO batch 不受影响；
+- `--adv-task-sample-ratio=0.25` 表示 counterfactual batch 默认为安全 batch 的25%；
+- `--adv-actor-egos-per-sample=1` 表示每个被抽中的 transition 只计算1个 ego，其 ego 编号随 transition 和训练轮次循环；
 - 安全折扣、target Polyak 和内层步数分别由 `--safety-gamma`、`--adv-target-tau` 和 `--adv-inner-steps` 配置；
 - 所有本方法特有日志统一使用 `adv_dgcbf/` 前缀，不复用 DGPPO 的 `Vh/` 分类；
-- 当前是固定图/核心 actor-update 验证版。compact-support gate、五类动态转移分层采样与 checkpoint 门限属于阶段 II，尚未实现。
+- 当前代码直接使用环境提供的有限感知动态图和当前邻居 mask。compact-support gate、五类动态转移分层采样与 checkpoint 门限属于阶段 II，尚未实现。
 
 ## 6. 训练数据与检验
 

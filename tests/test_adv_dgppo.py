@@ -48,8 +48,7 @@ class AdversarialDGPPOMathTest(unittest.TestCase):
 class AdversarialDGPPOIntegrationTest(unittest.TestCase):
     @staticmethod
     def _make_algo(env, **kwargs):
-        return make_algo(
-            "adversarial_dgppo",
+        config = dict(
             env=env,
             node_dim=env.node_dim,
             edge_dim=env.edge_dim,
@@ -62,24 +61,19 @@ class AdversarialDGPPOIntegrationTest(unittest.TestCase):
             adv_gnn_layers=1,
             adv_hidden_dim=16,
             adv_inner_steps=1,
-            **kwargs,
+            adv_batch_size=1,
+            adv_task_sample_ratio=1.0,
+            adv_actor_egos_per_sample=1,
         )
+        config.update(kwargs)
+        return make_algo("adversarial_dgppo", **config)
 
     def test_factory_rollout_update_and_metric_namespace(self):
         env = make_env("LidarTarget", 2, num_obs=0, max_step=2)
         algo = self._make_algo(env)
-        graph = env.reset(jr.PRNGKey(6))
-        actor_value, _ = algo._all_actor_safety_values(
-            graph,
-            jnp.zeros((env.num_agents, env.action_dim)),
-            algo.adv_q_train_state.params,
-            algo.adv_vh_train_state.params,
-            algo.adv_beta_train_state.params,
-        )
-        np.testing.assert_allclose(
-            actor_value,
-            algo.adv_vh.get_value(algo.adv_vh_train_state.params, graph),
-        )
+        self.assertEqual(algo.config["adv_batch_size"], 1)
+        self.assertEqual(algo.config["adv_task_sample_ratio"], 1.0)
+        self.assertEqual(algo.config["adv_actor_egos_per_sample"], 1)
         rollout = algo.collect(algo.params, jr.split(jr.PRNGKey(7), 1))
         safety_before = algo.adv_q_train_state.params
 
@@ -99,6 +93,12 @@ class AdversarialDGPPOIntegrationTest(unittest.TestCase):
         self.assertIn("adv_dgcbf/vh/loss", info)
         self.assertIn("adv_dgcbf/actor/safe_ratio", info)
         self.assertIn("adv_dgcbf/data/task_action_fraction", info)
+        self.assertEqual(
+            int(info["adv_dgcbf/data/adversarial_rollout_samples"]), 2
+        )
+        self.assertEqual(int(info["adv_dgcbf/data/adversarial_samples"]), 1)
+        self.assertEqual(int(info["adv_dgcbf/data/task_action_samples"]), 1)
+        self.assertEqual(int(info["adv_dgcbf/data/actor_ego_evaluations"]), 1)
         self.assertTrue(
             all(
                 not key.startswith("Vh/")
@@ -145,6 +145,18 @@ class AdversarialDGPPOIntegrationTest(unittest.TestCase):
                 jax.tree.leaves(restored.adv_q_target_params),
             ):
                 np.testing.assert_array_equal(left, right)
+
+    def test_actor_ego_budget_controls_public_update_work(self):
+        env = make_env("LidarTarget", 2, num_obs=0, max_step=1)
+        algo = self._make_algo(env, adv_actor_egos_per_sample=2)
+        rollout = algo.collect(algo.params, jr.split(jr.PRNGKey(9), 1))
+
+        info = algo.update(rollout, step=0)
+
+        self.assertEqual(
+            int(info["adv_dgcbf/data/actor_ego_evaluations"]), 2
+        )
+        self.assertEqual(float(info["adv_dgcbf/data/actor_ego_fraction"]), 1.0)
 
 
 if __name__ == "__main__":
