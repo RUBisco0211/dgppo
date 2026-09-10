@@ -1,8 +1,10 @@
-"""Render ego-centric contours for a trained GCBF or GCBF+ certificate.
+"""Render fixed-neighborhood contours for a trained GCBF/GCBF+ certificate.
 
 Blue/positive values are predicted safe and red/negative values are predicted
-unsafe.  The solid black curve is the learned ``h=0`` contour; the dashed grey
-curve is the environment's native collision boundary.
+unsafe.  For LidarEnv, every snapshot's ego neighborhood and LiDAR returns are
+frozen while only the ego position is swept over the global plane.  Objects
+outside the sensing neighborhood remain visible without entering the current
+certificate input.
 
 Example
 -------
@@ -40,6 +42,7 @@ from dgppo.algo.gcbf_plus_adapter import make_gcbf_plus_env_adapter
 from dgppo.env import make_env
 from dgppo.env.lidar_env.base import LidarEnv
 from dgppo.env.lidar_env.lidar_line import LidarLine
+from dgppo.env.plot import get_BuRd
 from dgppo.env.vmas import VMASNavigationObs, VMASReverseTransport, VMASWheel
 
 
@@ -150,6 +153,77 @@ def _parse_ego_agents(spec: str, n_agents: int) -> list[int]:
     return result
 
 
+def _move_ego_in_fixed_lidar_graph(
+    graph, env: LidarEnv, ego_agent: int, position: jax.Array
+):
+    """Move ego while preserving snapshot senders, receivers, and LiDAR nodes."""
+
+    states = graph.states.at[ego_agent, :2].set(position)
+    nodes = graph.nodes.at[ego_agent, : env.state_dim].set(states[ego_agent])
+    edge_states = jax.vmap(env.state2feat)(states)
+    edges = edge_states[graph.receivers] - edge_states[graph.senders]
+    agents = graph.env_states.agent.at[ego_agent, :2].set(position)
+    env_state = graph.env_states._replace(agent=agents)
+    return graph._replace(
+        nodes=nodes,
+        edges=edges,
+        states=states,
+        env_states=env_state,
+    )
+
+
+def _encode_environment_cost(raw_cost: jax.Array) -> jax.Array:
+    cost = jnp.where(raw_cost <= 0.0, raw_cost - 0.5, raw_cost + 0.5)
+    return jnp.clip(cost, a_min=-1.0, a_max=1.0)
+
+
+def _fixed_ego_cost(env: LidarEnv, graph, ego_agent: int) -> jax.Array:
+    """Apply env.get_cost geometry to the ego's frozen input contributors."""
+
+    positions = graph.states[: env.num_agents, :2]
+    senders = graph.senders
+    receivers = graph.receivers
+    safe_senders = jnp.clip(senders, 0, graph.states.shape[0] - 1)
+    agent_visible = (
+        (receivers == ego_agent)
+        & (senders < env.num_agents)
+        & (senders != ego_agent)
+    )
+    agent_distances = jnp.linalg.norm(
+        positions[ego_agent] - graph.states[safe_senders, :2], axis=-1
+    )
+    nearest_agent = jnp.min(
+        jnp.where(agent_visible, agent_distances, env.params["comm_radius"])
+    )
+    raw_agent_cost = 2.0 * env.params["car_radius"] - nearest_agent
+
+    if env.params["n_obs"] > 0:
+        n_rays = int(env.params["top_k_rays"])
+        lidar_start = env.num_agents + env.num_goals + ego_agent * n_rays
+        lidar_stop = lidar_start + n_rays
+        lidar_visible = (
+            (receivers == ego_agent)
+            & (senders >= lidar_start)
+            & (senders < lidar_stop)
+        )
+        lidar_distances = jnp.linalg.norm(
+            positions[ego_agent] - graph.states[safe_senders, :2], axis=-1
+        )
+        nearest_lidar = jnp.min(
+            jnp.where(
+                lidar_visible,
+                lidar_distances,
+                env.params["comm_radius"] - 0.1,
+            )
+        )
+        raw_obstacle_cost = env.params["car_radius"] - nearest_lidar
+    else:
+        raw_obstacle_cost = jnp.asarray(0.0, dtype=positions.dtype)
+    return _encode_environment_cost(
+        jnp.stack([raw_agent_cost, raw_obstacle_cost])
+    )
+
+
 def _make_action_source(mode: str, algo, env, seed: int) -> tuple[Callable, str]:
     if mode == "checkpoint":
         return jax.jit(lambda graph: algo.act(graph, algo.init_rnn_state)[0]), "GCBF+ actor"
@@ -191,9 +265,16 @@ def _make_grid_evaluator(algo, ego_agent: int) -> Callable:
     cbf_params = algo.cbf_train_state.params
 
     def evaluate(position, graph):
-        moved_graph = adapter.with_agent_position(graph, ego_agent, position)
+        if isinstance(algo._env, LidarEnv):
+            moved_graph = _move_ego_in_fixed_lidar_graph(
+                graph, algo._env, ego_agent, position
+            )
+            native_cost = _fixed_ego_cost(algo._env, moved_graph, ego_agent)
+        else:
+            moved_graph = adapter.with_agent_position(graph, ego_agent, position)
+            native_cost = algo._env.get_cost(moved_graph)[ego_agent]
         value = algo.get_cbf(moved_graph, cbf_params)[ego_agent, 0]
-        clearance = -jnp.max(algo._env.get_cost(moved_graph)[ego_agent])
+        clearance = -jnp.max(native_cost)
         return jnp.stack([value, clearance])
 
     return jax.jit(jax.vmap(evaluate, in_axes=(0, None)))
@@ -216,8 +297,83 @@ def _evaluate_grid_in_chunks(
     return np.concatenate(chunks, axis=0)
 
 
+def _fixed_lidar_input_geometry(
+    graph, env: LidarEnv, ego_agent: int
+) -> tuple[list[tuple[int, int]], np.ndarray]:
+    senders = np.asarray(graph.senders)
+    receivers = np.asarray(graph.receivers)
+    direct_neighbors = set(
+        senders[
+            (receivers == ego_agent) & (senders < env.num_agents)
+        ].tolist()
+    )
+    local_agents = direct_neighbors | {ego_agent}
+    edge_pairs: set[tuple[int, int]] = set()
+    for sender, receiver in zip(senders, receivers):
+        if sender in local_agents and receiver in local_agents and sender != receiver:
+            edge_pairs.add(tuple(sorted((int(sender), int(receiver)))))
+
+    n_rays = int(env.params["top_k_rays"])
+    lidar_start = env.num_agents + env.num_goals + ego_agent * n_rays
+    lidar_stop = lidar_start + n_rays
+    lidar_ids = senders[
+        (receivers == ego_agent)
+        & (senders >= lidar_start)
+        & (senders < lidar_stop)
+    ]
+    lidar_hits = np.asarray(graph.states)[np.unique(lidar_ids.astype(int)), :2]
+    return sorted(edge_pairs), lidar_hits
+
+
 def _draw_scene(ax, env, graph, adapter, ego_agent: int, show_goals: bool) -> None:
     state = graph.env_states
+    positions = np.asarray(adapter.agent_positions(graph))
+    ego_position = positions[ego_agent]
+
+    if isinstance(env, LidarEnv):
+        agent_edges, lidar_hits = _fixed_lidar_input_geometry(
+            graph, env, ego_agent
+        )
+        for sender, receiver in agent_edges:
+            ax.plot(
+                [positions[sender, 0], positions[receiver, 0]],
+                [positions[sender, 1], positions[receiver, 1]],
+                color="#707070",
+                linewidth=0.9,
+                alpha=0.72,
+                zorder=7,
+            )
+        for hit in lidar_hits:
+            ax.plot(
+                [ego_position[0], hit[0]],
+                [ego_position[1], hit[1]],
+                color="#777777",
+                linewidth=0.7,
+                alpha=0.68,
+                zorder=6,
+            )
+        if len(lidar_hits):
+            ax.scatter(
+                lidar_hits[:, 0],
+                lidar_hits[:, 1],
+                s=5,
+                color="#555555",
+                alpha=0.7,
+                zorder=7,
+            )
+        ax.add_patch(
+            Circle(
+                ego_position,
+                env.params["comm_radius"],
+                fill=False,
+                linestyle=(0, (3, 3)),
+                linewidth=1.8,
+                edgecolor="#6f6f6f",
+                alpha=0.9,
+                zorder=6,
+            )
+        )
+
     if isinstance(env, LidarEnv) and state.obstacle is not None:
         for polygon in np.asarray(state.obstacle.points):
             ax.add_patch(
@@ -276,7 +432,6 @@ def _draw_scene(ax, env, graph, adapter, ego_agent: int, show_goals: bool) -> No
         if len(goals):
             ax.scatter(goals[:, 0], goals[:, 1], marker="x", color="#315b20", zorder=9)
 
-    positions = np.asarray(adapter.agent_positions(graph))
     radius = adapter.agent_radius
     for index, position in enumerate(positions):
         is_ego = index == ego_agent
@@ -291,6 +446,19 @@ def _draw_scene(ax, env, graph, adapter, ego_agent: int, show_goals: bool) -> No
             )
         )
         ax.text(*position, str(index), ha="center", va="center", fontsize=8, zorder=11)
+
+    if isinstance(env, LidarEnv):
+        ax.text(
+            0.97,
+            0.97,
+            f"Sensing radius\nR={env.params['comm_radius']:g}",
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=9,
+            color="#202020",
+            zorder=20,
+        )
 
 
 def _zero_contour(ax, x_grid, y_grid, values, **kwargs) -> None:
@@ -310,46 +478,47 @@ def _render_frame(
     frame_index,
     value_limit,
     certificate_label,
-    policy_label,
     args,
 ) -> Image.Image:
-    fig, ax = plt.subplots(figsize=(8.2, 7.0), dpi=args.dpi, constrained_layout=True)
+    fig, ax = plt.subplots(figsize=(8.2, 7.0), dpi=args.dpi)
+    fig.subplots_adjust(left=0.025, right=0.90, bottom=0.025, top=0.975)
     levels = np.linspace(-value_limit, value_limit, 17)
     contour = ax.contourf(
         x_grid,
         y_grid,
         np.clip(value_grid, -value_limit, value_limit),
         levels=levels,
-        cmap="RdBu",
+        cmap=get_BuRd().reversed(),
         norm=TwoSlopeNorm(vmin=-value_limit, vcenter=0.0, vmax=value_limit),
         extend="both",
         alpha=0.88,
     )
     _zero_contour(ax, x_grid, y_grid, value_grid, colors="black", linewidths=1.7)
-    _zero_contour(
-        ax,
-        x_grid,
-        y_grid,
-        clearance_grid,
-        colors="#5a5a5a",
-        linestyles="--",
-        linewidths=1.0,
-    )
+    if args.show_clearance:
+        _zero_contour(
+            ax,
+            x_grid,
+            y_grid,
+            clearance_grid,
+            colors="#3f3f3f",
+            linestyles="--",
+            linewidths=1.2,
+        )
     _draw_scene(ax, algo._env, graph, algo.adapter, ego_agent, args.show_goals)
     xmin, xmax, ymin, ymax = algo.adapter.plot_bounds
-    ax.set(xlim=(xmin, xmax), ylim=(ymin, ymax), xlabel="x", ylabel="y")
+    ax.set(xlim=(xmin, xmax), ylim=(ymin, ymax))
     ax.set_aspect("equal", adjustable="box")
-    ax.set_title(
-        f"{certificate_label} certificate | ego {ego_agent} | frame {frame_index:02d}"
-    )
+    ax.set_axis_off()
     ax.text(
-        0.5,
-        -0.10,
-        f"scene policy: {policy_label}",
+        0.02,
+        0.98,
+        f"{certificate_label} · {type(algo._env).__name__}\nego {ego_agent} · frame {frame_index:02d}",
         transform=ax.transAxes,
-        ha="center",
+        ha="left",
+        va="top",
         fontsize=8,
-        color="#444444",
+        color="#303030",
+        zorder=20,
     )
     colorbar = fig.colorbar(contour, ax=ax, fraction=0.046, pad=0.025)
     colorbar.set_label("GCBF h (positive=safe)")
@@ -403,7 +572,7 @@ def visualize(args: argparse.Namespace) -> list[Path]:
             )
     else:
         algo.load(str(models_dir), step)
-    action_fn, policy_label = _make_action_source(policy_mode, algo, env, args.seed)
+    action_fn, _ = _make_action_source(policy_mode, algo, env, args.seed)
     snapshots = _collect_snapshots(env, action_fn, policy_mode, args)
 
     xmin, xmax, ymin, ymax = algo.adapter.plot_bounds
@@ -450,7 +619,6 @@ def visualize(args: argparse.Namespace) -> list[Path]:
                 frame_index,
                 value_limit,
                 certificate_label,
-                policy_label,
                 args,
             )
             for frame_index, graph in enumerate(snapshots)
@@ -459,7 +627,13 @@ def visualize(args: argparse.Namespace) -> list[Path]:
         _save_gif(frames, path, args.fps)
         written.append(path)
         print(f"wrote {path}", flush=True)
-    print(f"checkpoint={models_dir / step}, env={type(env).__name__}", flush=True)
+    print(
+        f"checkpoint={models_dir / step}, env={type(env).__name__}, "
+        f"source_agents={_cfg_get(config, 'num_agents')}, "
+        f"eval_agents={env.num_agents}, "
+        f"source_obs={_cfg_get(config, 'obs')}, eval_obs={env.params.get('n_obs')}",
+        flush=True,
+    )
     return written
 
 
@@ -467,7 +641,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Render GCBF/GCBF+ certificate contours")
     parser.add_argument("--gcbfplus-dir", type=Path, required=True)
     parser.add_argument("--step", default=None, help="checkpoint directory name; defaults to latest")
-    parser.add_argument("--policy-mode", choices=("checkpoint", "nominal", "random", "zero"), default="checkpoint")
+    parser.add_argument(
+        "--policy-mode",
+        choices=("checkpoint", "nominal", "random", "zero"),
+        default="random",
+        help="policy used only for scene rollout; defaults to the shared random rollout",
+    )
     parser.add_argument("-n", "--num-agents", type=int, default=None)
     parser.add_argument("--num-obs", "--obs", dest="num_obs", type=int, default=None)
     parser.add_argument("--ego-agents", default="all")
@@ -479,8 +658,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grid-batch-size", type=int, default=512)
     parser.add_argument("--fps", type=float, default=4.0)
     parser.add_argument("--dpi", type=int, default=110)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=6)
     parser.add_argument("--value-limit", type=float, default=None)
+    parser.add_argument(
+        "--show-clearance",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="draw the fixed-neighborhood environment boundary as a dashed line",
+    )
     parser.add_argument("--show-goals", action="store_true")
     return parser.parse_args()
 

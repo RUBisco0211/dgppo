@@ -1,10 +1,11 @@
 """Visualize a pretrained multi-agent Deep-QP HJ value as ego-centric GIFs.
 
-For every selected ego agent, this script rolls out an arbitrary policy, fixes
-the other agents and obstacles at each sampled rollout frame, moves the ego
-agent over an ``x-y`` grid, rebuilds the LidarSpread observation graph, and
-evaluates the frozen Graph-HJ critic.  The resulting contour frames are written
-as one GIF per ego agent.
+For every selected ego agent, this script rolls out an arbitrary policy and
+freezes that ego's graph neighborhood and LiDAR returns at each sampled frame.
+It then moves only the ego state over the global ``x-y`` grid, updates features
+on the fixed graph, and evaluates the frozen Graph-HJ critic.  Objects outside
+the sensing neighborhood remain visible but cannot enter the certificate
+input during the sweep.
 
 The policy is used only to produce changing scene snapshots.  Its safety is not
 evaluated and does not affect how the HJ value checkpoint is loaded.
@@ -13,8 +14,8 @@ Example
 -------
 python deep_qp_visualize.py \
     --deep-qp-checkpoint logs/LidarSpread/deepqp \
-    --policy-dir logs/LidarSpread/dgppo/seed0_707102621_YGIV \
-    --num-agents 8 --num-obs 6
+    --policy-mode random \
+    --output-dir 'figures/deep-qp-contour/train3->eval3'
 """
 
 from __future__ import annotations
@@ -51,7 +52,12 @@ from dgppo.algo.module.deep_qp_safety import (
     safety_lambda_at,
 )
 from dgppo.env import make_env
-from dgppo.env.lidar_env.base import LidarEnv, LidarEnvState
+from dgppo.env.lidar_env.base import LidarEnv
+from dgppo.env.plot import get_BuRd
+from dgppo.env.safety_constraint import (
+    safety_constraint_metadata,
+    safety_node_feature_mask,
+)
 
 
 DEFAULT_DEEP_QP_CHECKPOINT = Path("logs/LidarSpread/deepqp")
@@ -67,11 +73,36 @@ def _cfg_get(config: Any, name: str, default: Any = None) -> Any:
 
 def _checkpoint_file(path: Path) -> Path:
     path = path.expanduser().resolve()
-    if path.is_dir():
-        path = path / "deep_qp_safety.pkl"
-    if not path.is_file():
+    if path.is_file():
+        return path
+    if not path.is_dir():
         raise FileNotFoundError(f"Deep-QP checkpoint not found: {path}")
-    return path
+
+    # Accept either a checkpoint directory, a complete training-run directory,
+    # or the common parent containing copied/archived runs.
+    direct_candidates = (
+        path / "deep_qp_safety.pkl",
+        path / "models" / "latest" / "deep_qp_safety.pkl",
+    )
+    for candidate in direct_candidates:
+        if candidate.is_file():
+            return candidate
+
+    candidates = list(path.glob("**/models/latest/deep_qp_safety.pkl"))
+    if not candidates:
+        candidates = list(path.glob("**/deep_qp_safety.pkl"))
+    if not candidates:
+        raise FileNotFoundError(
+            "Deep-QP checkpoint not found under directory: " f"{path}"
+        )
+    checkpoint = max(candidates, key=lambda candidate: candidate.stat().st_mtime)
+    if len(candidates) > 1:
+        print(
+            f"found {len(candidates)} Deep-QP checkpoints under {path}; "
+            f"using the most recently modified: {checkpoint}",
+            flush=True,
+        )
+    return checkpoint
 
 
 def _load_checkpoint_payload(path: Path) -> dict[str, Any]:
@@ -125,23 +156,37 @@ def _load_safety_critic(
     init_graph,
 ) -> tuple[GraphHJSafetyCritic, Any, float]:
     config = _config_from_payload(payload)
+    metadata = payload["metadata"]
     action_lower, action_upper = env.action_lim()
+    is_environment_cost = metadata.get("cost_source") == "env.get_cost"
+    is_local_adapter = metadata.get("constraint_adapter") == "lidar_clearance_v1"
+    if not (is_environment_cost or is_local_adapter):
+        raise ValueError(
+            "unsupported Deep-QP constraint source: "
+            f"{metadata.get('cost_source') or metadata.get('constraint_adapter')}"
+        )
     critic = GraphHJSafetyCritic(
         action_dim=env.action_dim,
         n_agents=env.num_agents,
         action_lower=action_lower,
         action_upper=action_upper,
         config=config,
-        node_feature_mask=graph_hj_node_feature_mask(env),
+        node_feature_mask=(
+            graph_hj_node_feature_mask(env)
+            if is_environment_cost
+            else safety_node_feature_mask(env)
+        ),
     )
     state = critic.initialize(jr.PRNGKey(1), init_graph)
-    metadata = payload["metadata"]
-    if metadata.get("cost_source") != "env.get_cost":
-        raise ValueError(
-            "this visualization only accepts Graph-HJ checkpoints trained "
-            "directly from env.get_cost; retrain the supplied checkpoint"
+    if is_environment_cost:
+        expected_metadata = environment_cost_metadata(env)
+    else:
+        expected_metadata = safety_constraint_metadata(
+            env,
+            agent_margin=float(metadata["agent_margin"]),
+            obstacle_margin=float(metadata["obstacle_margin"]),
+            braking_accel=metadata.get("braking_accel"),
         )
-    expected_metadata = environment_cost_metadata(env)
     state = critic.load_checkpoint(
         state,
         checkpoint,
@@ -260,11 +305,21 @@ def _make_action_source(
 
         return zero_action, None, "zero policy"
 
-    rng = np.random.default_rng(seed)
+    # Match gcbfplus_visualize.py exactly: the first split is reserved for
+    # environment reset and subsequent splits generate rollout actions.
+    _, random_key = jr.split(jr.PRNGKey(seed))
+    lower, upper = env.action_lim()
 
     def random_action(_graph, state):
-        action = rng.uniform(-1.0, 1.0, (env.num_agents, env.action_dim))
-        return jnp.asarray(action, dtype=jnp.float32), state
+        nonlocal random_key
+        action_key, random_key = jr.split(random_key)
+        action = jr.uniform(
+            action_key,
+            (env.num_agents, env.action_dim),
+            minval=lower,
+            maxval=upper,
+        )
+        return action, state
 
     return random_action, None, "uniform random policy"
 
@@ -279,7 +334,8 @@ def _collect_scene_snapshots(
     frame_stride: int,
     rollout_start: int,
 ) -> list[Any]:
-    graph = env.reset(jr.PRNGKey(seed))
+    reset_key, _ = jr.split(jr.PRNGKey(seed))
+    graph = env.reset(reset_key)
     snapshots = []
     total_steps = rollout_start + (frames - 1) * frame_stride + 1
     capture_steps = {
@@ -310,26 +366,220 @@ def _parse_ego_agents(spec: str, n_agents: int) -> list[int]:
     return result
 
 
+def _move_ego_in_fixed_graph(
+    graph, env: LidarEnv, ego_agent: int, xy: jax.Array
+):
+    """Move ego while preserving snapshot senders, receivers, and LiDAR nodes."""
+
+    states = graph.states.at[ego_agent, :2].set(xy)
+    nodes = graph.nodes.at[ego_agent, : env.state_dim].set(states[ego_agent])
+    edges = states[graph.receivers] - states[graph.senders]
+    agents = graph.env_states.agent.at[ego_agent, :2].set(xy)
+    env_state = graph.env_states._replace(agent=agents)
+    return graph._replace(
+        nodes=nodes,
+        edges=edges,
+        states=states,
+        env_states=env_state,
+    )
+
+
+def _encode_environment_cost(raw_cost: jax.Array) -> jax.Array:
+    cost = jnp.where(raw_cost <= 0.0, raw_cost - 0.5, raw_cost + 0.5)
+    return jnp.clip(cost, a_min=-1.0, a_max=1.0)
+
+
+def _fixed_ego_cost(env: LidarEnv, graph, ego_agent: int) -> jax.Array:
+    """Apply env.get_cost geometry to the ego's frozen input contributors."""
+
+    n_agents = env.num_agents
+    positions = graph.states[:n_agents, :2]
+    senders = graph.senders
+    receivers = graph.receivers
+    safe_senders = jnp.clip(senders, 0, graph.states.shape[0] - 1)
+
+    agent_visible = (
+        (receivers == ego_agent)
+        & (senders < n_agents)
+        & (senders != ego_agent)
+    )
+    agent_distances = jnp.linalg.norm(
+        positions[ego_agent] - graph.states[safe_senders, :2], axis=-1
+    )
+    nearest_agent = jnp.min(
+        jnp.where(agent_visible, agent_distances, env.params["comm_radius"])
+    )
+    raw_agent_cost = 2.0 * env.params["car_radius"] - nearest_agent
+
+    if env.params["n_obs"] > 0:
+        n_rays = int(env.params["top_k_rays"])
+        lidar_start = n_agents + env.num_goals + ego_agent * n_rays
+        lidar_stop = lidar_start + n_rays
+        lidar_visible = (
+            (receivers == ego_agent)
+            & (senders >= lidar_start)
+            & (senders < lidar_stop)
+        )
+        lidar_distances = jnp.linalg.norm(
+            positions[ego_agent] - graph.states[safe_senders, :2], axis=-1
+        )
+        nearest_lidar = jnp.min(
+            jnp.where(
+                lidar_visible,
+                lidar_distances,
+                env.params["comm_radius"] - 0.1,
+            )
+        )
+        raw_obstacle_cost = env.params["car_radius"] - nearest_lidar
+    else:
+        raw_obstacle_cost = jnp.asarray(0.0, dtype=positions.dtype)
+
+    return _encode_environment_cost(
+        jnp.stack([raw_agent_cost, raw_obstacle_cost])
+    )
+
+
+def _fixed_ego_clearance(
+    env: LidarEnv,
+    graph,
+    ego_agent: int,
+    metadata: dict[str, Any],
+    maximum_margin: float,
+) -> jax.Array:
+    """Evaluate the legacy clearance adapter on frozen contributor identities."""
+
+    positions = graph.states[: env.num_agents, :2]
+    velocities = graph.states[: env.num_agents, 2:4]
+    senders = graph.senders
+    receivers = graph.receivers
+    safe_senders = jnp.clip(senders, 0, graph.states.shape[0] - 1)
+    braking_accel = metadata.get("braking_accel")
+
+    def braking(relative_position, relative_velocity):
+        if braking_accel is None:
+            return jnp.zeros(relative_position.shape[:-1], dtype=positions.dtype)
+        distance = jnp.linalg.norm(relative_position, axis=-1)
+        direction = relative_position / jnp.maximum(distance[..., None], 1e-6)
+        closing_speed = jnp.maximum(
+            -jnp.sum(relative_velocity * direction, axis=-1), 0.0
+        )
+        return closing_speed**2 / (2.0 * float(braking_accel))
+
+    if braking_accel is None:
+        maximum_speed = 0.0
+    else:
+        lower, upper = env.state_lim()
+        velocity_limit = jnp.maximum(jnp.abs(lower[2:4]), jnp.abs(upper[2:4]))
+        maximum_speed = jnp.linalg.norm(velocity_limit)
+
+    agent_collision = 2.0 * env.params["car_radius"] + float(
+        metadata["agent_margin"]
+    )
+    worst_agent_braking = (
+        0.0
+        if braking_accel is None
+        else (2.0 * maximum_speed) ** 2 / (2.0 * float(braking_accel))
+    )
+    agent_ceiling = jnp.minimum(
+        maximum_margin,
+        env.params["comm_radius"] - agent_collision - worst_agent_braking,
+    )
+    agent_visible = (
+        (receivers == ego_agent)
+        & (senders < env.num_agents)
+        & (senders != ego_agent)
+    )
+    agent_relative_position = (
+        positions[ego_agent] - graph.states[safe_senders, :2]
+    )
+    agent_relative_velocity = (
+        velocities[ego_agent] - graph.states[safe_senders, 2:4]
+    )
+    agent_clearance = (
+        jnp.linalg.norm(agent_relative_position, axis=-1)
+        - agent_collision
+        - braking(agent_relative_position, agent_relative_velocity)
+    )
+    agent_clearance = jnp.min(
+        jnp.where(agent_visible, jnp.minimum(agent_clearance, agent_ceiling), agent_ceiling)
+    )
+
+    if env.params["n_obs"] == 0:
+        return jnp.minimum(agent_clearance, maximum_margin)
+
+    obstacle_collision = env.params["car_radius"] + float(
+        metadata["obstacle_margin"]
+    )
+    obstacle_sense_range = env.params["comm_radius"] - 0.1
+    worst_obstacle_braking = (
+        0.0
+        if braking_accel is None
+        else maximum_speed**2 / (2.0 * float(braking_accel))
+    )
+    obstacle_ceiling = jnp.minimum(
+        maximum_margin,
+        obstacle_sense_range - obstacle_collision - worst_obstacle_braking,
+    )
+    n_rays = int(env.params["top_k_rays"])
+    lidar_start = env.num_agents + env.num_goals + ego_agent * n_rays
+    lidar_stop = lidar_start + n_rays
+    lidar_visible = (
+        (receivers == ego_agent)
+        & (senders >= lidar_start)
+        & (senders < lidar_stop)
+    )
+    obstacle_relative_position = (
+        positions[ego_agent] - graph.states[safe_senders, :2]
+    )
+    obstacle_relative_velocity = jnp.broadcast_to(
+        velocities[ego_agent], obstacle_relative_position.shape
+    )
+    obstacle_clearance = (
+        jnp.linalg.norm(obstacle_relative_position, axis=-1)
+        - obstacle_collision
+        - braking(obstacle_relative_position, obstacle_relative_velocity)
+    )
+    obstacle_clearance = jnp.min(
+        jnp.where(
+            lidar_visible,
+            jnp.minimum(obstacle_clearance, obstacle_ceiling),
+            obstacle_ceiling,
+        )
+    )
+    return jnp.minimum(
+        jnp.minimum(agent_clearance, obstacle_clearance), maximum_margin
+    )
+
+
 def _make_grid_evaluator(
     env: LidarEnv,
     critic: GraphHJSafetyCritic,
     params,
     safety_lambda: float,
+    checkpoint_metadata: dict[str, Any],
     ego_agent: int,
 ) -> Callable:
     config = critic.config
 
     def evaluate_one(
         xy: jax.Array,
-        base_agents: jax.Array,
-        goals: jax.Array,
-        obstacles,
+        base_graph,
     ) -> jax.Array:
-        agents = base_agents.at[ego_agent, :2].set(xy)
-        env_state = LidarEnvState(agents, goals, obstacles)
-        lidar_data = env.get_lidar_data(agents, obstacles)
-        graph = env.get_graph(env_state, lidar_data)
-        constraint = -jnp.max(env.get_cost(graph), axis=-1)
+        graph = _move_ego_in_fixed_graph(base_graph, env, ego_agent, xy)
+        if checkpoint_metadata.get("cost_source") == "env.get_cost":
+            fixed_constraint = -jnp.max(_fixed_ego_cost(env, graph, ego_agent))
+        else:
+            fixed_constraint = _fixed_ego_clearance(
+                env,
+                graph,
+                ego_agent,
+                checkpoint_metadata,
+                config.constraint_scale,
+            )
+        constraint = jnp.full(
+            (env.num_agents,), config.constraint_scale, dtype=graph.nodes.dtype
+        )
+        constraint = constraint.at[ego_agent].set(fixed_constraint)
         certificate = critic.certify(params, graph, constraint, safety_lambda)
         return jnp.stack(
             [
@@ -338,7 +588,7 @@ def _make_grid_evaluator(
             ]
         )
 
-    return jax.jit(jax.vmap(evaluate_one, in_axes=(0, None, None, None)))
+    return jax.jit(jax.vmap(evaluate_one, in_axes=(0, None)))
 
 
 def _evaluate_contours(
@@ -349,14 +599,11 @@ def _evaluate_contours(
     values = {ego: [] for ego in evaluators}
     constraints = {ego: [] for ego in evaluators}
     for frame_idx, graph in enumerate(snapshots):
-        env_state = graph.env_states
         for ego, evaluator in evaluators.items():
             evaluated = np.asarray(
                 evaluator(
                     grid_points,
-                    jnp.asarray(env_state.agent),
-                    jnp.asarray(env_state.goal),
-                    jax.tree.map(jnp.asarray, env_state.obstacle),
+                    jax.tree.map(jnp.asarray, graph),
                 )
             )
             values[ego].append(evaluated[:, 0])
@@ -400,6 +647,39 @@ def _draw_obstacles(ax, obstacles) -> None:
         )
 
 
+def _draw_zero_contour(ax, x_grid, y_grid, field, **kwargs) -> None:
+    finite = field[np.isfinite(field)]
+    if finite.size and finite.min() <= 0.0 <= finite.max():
+        ax.contour(x_grid, y_grid, field, levels=[0.0], **kwargs)
+
+
+def _fixed_input_geometry(
+    graph, env: LidarEnv, ego_agent: int
+) -> tuple[list[tuple[int, int]], np.ndarray]:
+    senders = np.asarray(graph.senders)
+    receivers = np.asarray(graph.receivers)
+    n_agents = env.num_agents
+    direct_neighbors = set(
+        senders[(receivers == ego_agent) & (senders < n_agents)].tolist()
+    )
+    local_agents = direct_neighbors | {ego_agent}
+    edge_pairs: set[tuple[int, int]] = set()
+    for sender, receiver in zip(senders, receivers):
+        if sender in local_agents and receiver in local_agents and sender != receiver:
+            edge_pairs.add(tuple(sorted((int(sender), int(receiver)))))
+
+    n_rays = int(env.params["top_k_rays"])
+    lidar_start = n_agents + env.num_goals + ego_agent * n_rays
+    lidar_stop = lidar_start + n_rays
+    lidar_ids = senders[
+        (receivers == ego_agent)
+        & (senders >= lidar_start)
+        & (senders < lidar_stop)
+    ]
+    lidar_hits = np.asarray(graph.states)[np.unique(lidar_ids.astype(int)), :2]
+    return sorted(edge_pairs), lidar_hits
+
+
 def _render_frame(
     *,
     x_grid: np.ndarray,
@@ -411,11 +691,12 @@ def _render_frame(
     frame_idx: int,
     value_limit: float,
     env: LidarEnv,
-    policy_label: str,
     show_goals: bool,
+    show_clearance: bool,
     dpi: int,
 ) -> Image.Image:
-    fig, ax = plt.subplots(figsize=(8.2, 7.0), dpi=dpi, constrained_layout=True)
+    fig, ax = plt.subplots(figsize=(8.2, 7.0), dpi=dpi)
+    fig.subplots_adjust(left=0.025, right=0.90, bottom=0.025, top=0.975)
     levels = np.linspace(-value_limit, value_limit, 17)
     norm = TwoSlopeNorm(vmin=-value_limit, vcenter=0.0, vmax=value_limit)
     contour = ax.contourf(
@@ -423,31 +704,37 @@ def _render_frame(
         y_grid,
         np.clip(value_grid, -value_limit, value_limit),
         levels=levels,
-        cmap="RdBu",
+        cmap=get_BuRd().reversed(),
         norm=norm,
         extend="both",
         alpha=0.88,
         zorder=0,
     )
-    ax.contour(
+    _draw_zero_contour(
+        ax,
         x_grid,
         y_grid,
         value_grid,
-        levels=[0.0],
         colors="black",
         linewidths=1.7,
         zorder=5,
     )
-    ax.contour(
-        x_grid,
-        y_grid,
-        constraint_grid,
-        levels=[0.0],
-        colors="#5a5a5a",
-        linestyles="--",
-        linewidths=1.0,
-        zorder=4,
-    )
+    if show_clearance:
+        finite_constraint = constraint_grid[np.isfinite(constraint_grid)]
+        if (
+            finite_constraint.size
+            and finite_constraint.min() <= 0.0 <= finite_constraint.max()
+        ):
+            _draw_zero_contour(
+                ax,
+                x_grid,
+                y_grid,
+                constraint_grid,
+                colors="#3f3f3f",
+                linestyles="--",
+                linewidths=1.2,
+                zorder=4,
+            )
 
     state = graph.env_states
     agents = np.asarray(state.agent)
@@ -455,18 +742,32 @@ def _render_frame(
     _draw_obstacles(ax, state.obstacle)
 
     ego_position = positions[ego_agent]
-    distances = np.linalg.norm(positions - ego_position, axis=-1)
-    neighbors = (
-        (distances < env.params["comm_radius"])
-        & (np.arange(env.num_agents) != ego_agent)
-    )
-    for neighbor in np.flatnonzero(neighbors):
+    agent_edges, lidar_hits = _fixed_input_geometry(graph, env, ego_agent)
+    for sender, receiver in agent_edges:
         ax.plot(
-            [ego_position[0], positions[neighbor, 0]],
-            [ego_position[1], positions[neighbor, 1]],
+            [positions[sender, 0], positions[receiver, 0]],
+            [positions[sender, 1], positions[receiver, 1]],
             color="#707070",
-            linewidth=1.1,
-            alpha=0.85,
+            linewidth=0.9,
+            alpha=0.72,
+            zorder=7,
+        )
+    for hit in lidar_hits:
+        ax.plot(
+            [ego_position[0], hit[0]],
+            [ego_position[1], hit[1]],
+            color="#777777",
+            linewidth=0.7,
+            alpha=0.68,
+            zorder=6,
+        )
+    if len(lidar_hits):
+        ax.scatter(
+            lidar_hits[:, 0],
+            lidar_hits[:, 1],
+            s=5,
+            color="#555555",
+            alpha=0.7,
             zorder=7,
         )
     ax.add_patch(
@@ -540,22 +841,20 @@ def _render_frame(
         bbox={"facecolor": "white", "alpha": 0.82, "edgecolor": "#777777"},
         zorder=20,
     )
-    ax.set_title("Pretrained Deep-QP HJ Value (source: env.get_cost)")
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
     ax.set_xlim(0.0, env.area_size)
     ax.set_ylim(0.0, env.area_size)
     ax.set_aspect("equal", adjustable="box")
-    ax.grid(color="white", linewidth=0.5, alpha=0.25)
+    ax.set_axis_off()
     ax.text(
-        0.5,
-        -0.10,
-        f"scene policy: {policy_label} (safety not evaluated)",
+        0.97,
+        0.97,
+        f"Sensing radius\nR={env.params['comm_radius']:g}",
         transform=ax.transAxes,
-        ha="center",
+        ha="right",
         va="top",
-        fontsize=8,
-        color="#444444",
+        fontsize=9,
+        color="#202020",
+        zorder=20,
     )
     colorbar = fig.colorbar(contour, ax=ax, fraction=0.046, pad=0.025)
     colorbar.set_label("HJ value V (physical constraint units)")
@@ -607,7 +906,7 @@ def visualize(args: argparse.Namespace) -> list[Path]:
     params = (
         safety_state.online.params if args.online_params else safety_state.target_params
     )
-    act, rnn_state, policy_label = _make_action_source(
+    act, rnn_state, _ = _make_action_source(
         args.policy_mode,
         args.policy_dir,
         args.policy_step,
@@ -634,6 +933,7 @@ def visualize(args: argparse.Namespace) -> list[Path]:
             critic,
             params,
             safety_lambda,
+            payload["metadata"],
             ego,
         )
         for ego in ego_agents
@@ -657,8 +957,8 @@ def visualize(args: argparse.Namespace) -> list[Path]:
                     frame_idx=frame_idx,
                     value_limit=value_limit,
                     env=env,
-                    policy_label=policy_label,
                     show_goals=args.show_goals,
+                    show_clearance=args.show_clearance,
                     dpi=args.dpi,
                 )
             )
@@ -674,7 +974,8 @@ def visualize(args: argparse.Namespace) -> list[Path]:
         f"eval_agents={env.num_agents}, "
         f"source_obs={payload['metadata'].get('n_obs')}, "
         f"eval_obs={env.params['n_obs']}, "
-        "cost_source=env.get_cost, "
+        "constraint_source="
+        f"{payload['metadata'].get('cost_source') or payload['metadata'].get('constraint_adapter')}, "
         f"lambda={safety_lambda:.8f}, value_limit=±{value_limit:.5f}",
         flush=True,
     )
@@ -684,7 +985,7 @@ def visualize(args: argparse.Namespace) -> list[Path]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Render one ego-centric Deep-QP HJ-value GIF per selected agent."
+            "Render fixed-neighborhood Deep-QP HJ contours on the global plane."
         )
     )
     parser.add_argument(
@@ -696,8 +997,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--policy-mode",
         choices=("checkpoint", "random", "zero"),
-        default="checkpoint",
-        help="policy used only to produce scene snapshots",
+        default="random",
+        help="policy used only for scene snapshots; defaults to the shared random rollout",
     )
     parser.add_argument(
         "--policy-dir",
@@ -748,7 +1049,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grid-size", type=int, default=65)
     parser.add_argument("--fps", type=float, default=4.0)
     parser.add_argument("--dpi", type=int, default=110)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=6)
     parser.add_argument(
         "--value-limit",
         type=float,
@@ -761,6 +1062,12 @@ def parse_args() -> argparse.Namespace:
         help="evaluate online rather than the default target-network params",
     )
     parser.add_argument("--show-goals", action="store_true")
+    parser.add_argument(
+        "--show-clearance",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="draw the fixed-neighborhood environment boundary as a dashed line",
+    )
     return parser.parse_args()
 
 
