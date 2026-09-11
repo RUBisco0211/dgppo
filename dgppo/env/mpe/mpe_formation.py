@@ -96,6 +96,10 @@ class MPEFormation(MPESpread):
         goals = landmarks + R * jnp.stack([jnp.cos(thetas), jnp.sin(thetas)], axis=-1)
         return goals
 
+    def render_task_goal_positions(self, graph: MPEEnvGraphsTuple) -> Pos2d:
+        landmark = graph.type_states(type_idx=1, n_type=self.num_goals)[:, :2]
+        return self.landmark2goal(landmark, self.params["comm_radius"])
+
     def get_reward(self, graph: MPEEnvGraphsTuple, action: Action) -> Reward:
         agent_states = graph.type_states(type_idx=0, n_type=self.num_agents)
         landmark = graph.type_states(type_idx=1, n_type=self.num_goals)[:, :2]

@@ -9,7 +9,10 @@ from abc import ABC, abstractmethod
 from dgppo.env.plot import render_mpe
 from dgppo.trainer.data import Rollout
 from dgppo.utils.graph import EdgeBlock, GetGraph, GraphsTuple
-from dgppo.utils.typing import Action, Array, Cost, Done, Info, Reward, State, AgentState
+from dgppo.utils.typing import (
+    Action, AgentState, Array, Cost, Done, Info, Pos2d, Reward, State,
+)
+from dgppo.utils.utils import tree_index
 from dgppo.env.base import MultiAgentEnv
 from dgppo.env.utils import get_node_goal_rng
 
@@ -199,10 +202,27 @@ class MPE(MultiAgentEnv, ABC):
             dpi: int = 100,
             **kwargs
     ) -> None:
+        graph0 = tree_index(rollout.graph, 0)
         render_mpe(rollout=rollout, video_path=video_path, side_length=self.area_size, dim=2, n_agent=self.num_agents,
                    n_obs=self.params['n_obs'], r=self.params["car_radius"], obs_r=self.params['obs_radius'],
                    cost_components=self.cost_components, Ta_is_unsafe=Ta_is_unsafe, viz_opts=viz_opts,
-                   n_goal=self.num_goals, dpi=dpi, **kwargs)
+                   n_goal=self.num_goals, dpi=dpi,
+                   plot_bounds=self.render_plot_bounds(rollout),
+                   task_goal_positions=self.render_task_goal_positions(graph0),
+                   **kwargs)
+
+    def render_plot_bounds(
+            self, rollout: Rollout
+    ) -> Tuple[float, float, float, float]:
+        lower_lim, upper_lim = self.state_lim()
+        return (float(lower_lim[0]), float(upper_lim[0]),
+                float(lower_lim[1]), float(upper_lim[1]))
+
+    def render_task_goal_positions(
+            self, graph: MPEEnvGraphsTuple
+    ) -> Optional[Pos2d]:
+        """Return derived task goals that are not represented as graph nodes."""
+        return None
 
     @abstractmethod
     def edge_blocks(self, state: MPEEnvState) -> list[EdgeBlock]:

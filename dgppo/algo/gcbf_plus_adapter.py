@@ -16,6 +16,8 @@ from ..env.base import MultiAgentEnv
 from ..env.lidar_env.base import LidarEnv, LidarEnvState
 from ..env.lidar_env.lidar_bicycle_target import LidarBicycleTarget
 from ..env.lidar_env.lidar_line import LidarLine
+from ..env.mpe import MPEConnectSpread, MPEFormation, MPELine
+from ..env.mpe.base import MPE, MPEEnvState
 from ..env.vmas import (
     VMASNavigation,
     VMASNavigationObs,
@@ -136,6 +138,41 @@ class LidarGCBFPlusAdapter(GCBFPlusEnvAdapter):
         return 0.0, self.env.area_size, 0.0, self.env.area_size
 
 
+class MPEGCBFPlusAdapter(GCBFPlusEnvAdapter):
+    """GCBF+ environment behavior for native circular-obstacle MPE graphs."""
+
+    env: MPE
+
+    def nominal_action(self, graph: GraphsTuple) -> Action:
+        state: MPEEnvState = graph.env_states
+        goal_positions = state.goal[:, :2]
+        if isinstance(self.env, MPELine):
+            goal_positions = self.env.landmark2goal(goal_positions)
+        elif isinstance(self.env, MPEFormation):
+            goal_positions = self.env.landmark2goal(
+                goal_positions, self.env.params["comm_radius"]
+            )
+        position_error = goal_positions - state.agent[:, :2]
+        velocity = state.agent[:, 2:4]
+        action = (2.0 * position_error - velocity) / 10.0
+        return self.env.clip_action(action)
+
+    def agent_positions(self, graph: GraphsTuple) -> Array:
+        return graph.env_states.agent[:, :2]
+
+    def with_agent_position(
+        self, graph: GraphsTuple, agent: int, position: Array
+    ) -> GraphsTuple:
+        state: MPEEnvState = graph.env_states
+        agents = state.agent.at[agent, :2].set(position)
+        return self.env.get_graph(state._replace(agent=agents))
+
+    @property
+    def plot_bounds(self) -> tuple[float, float, float, float]:
+        lower, upper = self.env.state_lim()
+        return float(lower[0]), float(upper[0]), float(lower[1]), float(upper[1])
+
+
 class VMASGCBFPlusAdapter(GCBFPlusEnvAdapter):
     env: VMASNavigation | VMASNavigationObs | VMASReverseTransport | VMASWheel
 
@@ -175,12 +212,16 @@ class VMASGCBFPlusAdapter(GCBFPlusEnvAdapter):
 def make_gcbf_plus_env_adapter(env: MultiAgentEnv) -> GCBFPlusEnvAdapter:
     if isinstance(env, LidarEnv):
         return LidarGCBFPlusAdapter(env)
+    if isinstance(env, MPEConnectSpread):
+        raise ValueError("GCBF+ does not yet support MPEConnectSpread.")
+    if isinstance(env, MPE):
+        return MPEGCBFPlusAdapter(env)
     if isinstance(
         env,
         (VMASNavigation, VMASNavigationObs, VMASReverseTransport, VMASWheel),
     ):
         return VMASGCBFPlusAdapter(env)
     raise ValueError(
-        "GCBF+ supports the LidarEnv and VMAS environment families; "
+        "GCBF+ supports the LidarEnv, MPE, and VMAS environment families; "
         f"got {type(env).__name__}"
     )

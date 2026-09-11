@@ -13,6 +13,7 @@ from dgppo.algo.informarl_deep_qp import (
 )
 from dgppo.env.vmas.vmas_navigation import VMASNavigation
 from dgppo.env.lidar_env.lidar_target import LidarTarget
+from dgppo.env.mpe.mpe_spread import MPESpread
 from dgppo.trainer.data import Rollout
 
 
@@ -152,6 +153,43 @@ class InforMARLDeepQPTest(unittest.TestCase):
                 np.asarray(info["deep-qp/policy/violation_mean"])
             )
         )
+
+    def test_mpe_rollout_and_update_use_environment_cost(self):
+        params = MPESpread.PARAMS.copy()
+        params["n_obs"] = 1
+        env = MPESpread(num_agents=2, max_step=4, params=params)
+        algo = InforMARLDeepQP(
+            env=env,
+            node_dim=env.node_dim,
+            edge_dim=env.edge_dim,
+            state_dim=env.state_dim,
+            action_dim=env.action_dim,
+            n_agents=env.num_agents,
+            use_rnn=False,
+            batch_size=env.max_episode_steps,
+            rnn_step=env.max_episode_steps,
+            deep_qp_gnn_out_dim=8,
+            deep_qp_hidden_dim=16,
+            deep_qp_hidden_layers=1,
+        )
+        graph = env.reset(jr.PRNGKey(14))
+        expected_constraint = -jnp.max(env.get_cost(graph), axis=-1)
+        certificate = algo.safety_critic.certify(
+            algo.safety_train_state.target_params,
+            graph,
+            expected_constraint,
+            algo.safety_critic.config.lambda_init,
+        )
+        np.testing.assert_array_equal(
+            certificate.constraint * algo.safety_critic.config.constraint_scale,
+            expected_constraint,
+        )
+
+        rollout = algo.collect(algo.params, jr.split(jr.PRNGKey(15), 1))
+        info = algo.update(rollout, step=0)
+        self.assertEqual(rollout.actions.shape, (1, 4, 2, 2))
+        self.assertTrue(np.isfinite(np.asarray(info["policy/loss"])))
+        self.assertEqual(algo._checkpoint_metadata()["cost_source"], "env.get_cost")
 
     def test_frozen_hj_checkpoint_transfers_to_larger_policy_team(self):
         source_env = VMASNavigation(

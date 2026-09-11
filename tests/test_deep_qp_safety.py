@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
@@ -19,6 +20,7 @@ from dgppo.env.safety_constraint import (
     vmas_navigation_safety_constraint,
 )
 from dgppo.env.lidar_env.lidar_target import LidarTarget
+from dgppo.env.mpe.mpe_spread import MPESpread
 from dgppo.env.vmas.vmas_navigation import VMASNavigation, VMASNavigationState
 from dgppo.env.vmas.vmas_navigation_obs import (
     VMASNavigationObs,
@@ -26,7 +28,7 @@ from dgppo.env.vmas.vmas_navigation_obs import (
 )
 from dgppo.trainer.data import SafetyBatch
 from dgppo.trainer.safety_buffer import SafetyReplayBuffer
-from train_safety_filter import _make_collector
+from train_safety_filter import _make_collector, train as train_safety_filter
 
 
 def _env_and_graph():
@@ -40,6 +42,36 @@ def _env_and_graph():
 
 
 class SafetyConstraintTest(unittest.TestCase):
+    def test_mpe_graph_hj_pretraining_uses_environment_cost(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = SimpleNamespace(
+                env="MPESpread", num_agents=2, obs=1, n_rays=32,
+                full_observation=False, seed=0, steps=1, n_env=1,
+                rollout_steps=1, updates_per_collect=1, warmup=1,
+                batch_size=1, replay_size=2, gnn_layers=1, gnn_out_dim=8,
+                hidden_dim=16, hidden_layers=1, lr=3e-4, lr_final=3e-6,
+                max_grad_norm=2.0, tau=0.005, lambda_init=0.1,
+                lambda_final=0.0001, lambda_decay_steps=10,
+                constraint_scale=0.5, output_dir=directory, resume=None,
+                save_interval=1, log_interval=1, eval_interval=1,
+                eval_n_env=1, log_file="training_metrics.jsonl",
+                wandb_mode="disabled", wandb_project="dgppo",
+                wandb_name=None, wandb_run_id=None, debug=False,
+            )
+
+            train_safety_filter(args)
+
+            self.assertTrue((Path(directory) / "deep_qp_safety.pkl").is_file())
+            batch = _make_collector(
+                MPESpread(num_agents=2, max_step=1, params={
+                    **MPESpread.PARAMS, "n_obs": 1
+                }),
+                n_env=1,
+                rollout_steps=1,
+            )(jr.PRNGKey(22))
+            self.assertEqual(batch.constraints.shape, (1, 2))
+            self.assertTrue(np.isfinite(np.asarray(batch.constraints)).all())
+
     def test_graph_hj_collector_uses_lidar_environment_cost_exactly(self):
         params = LidarTarget.PARAMS.copy()
         params["n_obs"] = 1

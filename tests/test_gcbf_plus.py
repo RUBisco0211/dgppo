@@ -49,12 +49,17 @@ class GCBFPlusTest(unittest.TestCase):
             self.assertTrue(bool(jnp.isfinite(sampled.graph.edges).all()))
             self.assertTrue(bool(sampled.unsafe_mask[:, 0].all()))
 
-    def test_adapters_cover_lidar_and_vmas_families(self):
+    def test_adapters_cover_supported_environment_families(self):
         cases = (
             ("LidarTarget", 2, 1),
             ("LidarSpread", 3, 1),
             ("LidarLine", 3, 1),
             ("LidarBicycleTarget", 2, 1),
+            ("MPETarget", 2, 1),
+            ("MPESpread", 3, 1),
+            ("MPELine", 3, 1),
+            ("MPEFormation", 3, 1),
+            ("MPECorridor", 3, 2),
             ("VMASNavigation", 2, 0),
             ("VMASNavigationObs", 2, 1),
             ("VMASReverseTransport", 3, 0),
@@ -70,6 +75,20 @@ class GCBFPlusTest(unittest.TestCase):
                 self.assertEqual(action.shape, (n_agents, env.action_dim))
                 self.assertEqual(adapter.unsafe_mask(graph).shape, (n_agents,))
                 self.assertEqual(next_graph.nodes.shape, graph.nodes.shape)
+                self.assertTrue(bool(jnp.isfinite(action).all()))
+
+    def test_mpe_adapter_rebuilds_graph_with_native_circle_obstacles(self):
+        env = make_env("MPESpread", 2, num_obs=1, max_step=1)
+        graph = env.reset(jr.PRNGKey(21))
+        adapter = make_gcbf_plus_env_adapter(env)
+        obstacle_position = graph.env_states.obs[0, :2]
+
+        moved = adapter.with_agent_position(graph, 0, obstacle_position)
+
+        self.assertTrue(bool(adapter.unsafe_mask(moved)[0]))
+        self.assertTrue(
+            bool(jnp.allclose(adapter.agent_positions(moved)[0], obstacle_position))
+        )
 
     def test_horizon_safe_mask_matches_upstream_definition(self):
         env = make_env("LidarTarget", 2, num_obs=0, max_step=2)
@@ -107,6 +126,19 @@ class GCBFPlusTest(unittest.TestCase):
         )
         self.assertGreater(actor_change, 0.0)
         self.assertGreater(cbf_change, 0.0)
+        self.assertTrue(bool(jnp.isfinite(info["loss/total"])))
+
+    def test_mpe_collect_qp_and_joint_update(self):
+        env = make_env("MPESpread", 2, num_obs=1, max_step=2)
+        algo = _make_algo(env)
+        rollout = algo.collect(algo.params, jr.split(jr.PRNGKey(23), 1))
+        action = algo.get_qp_action(
+            env.reset(jr.PRNGKey(24)), algo.cbf_target_params
+        )
+        info = algo.update(rollout, 0)
+
+        self.assertEqual(action.shape, (2, 2))
+        self.assertTrue(bool(jnp.isfinite(action).all()))
         self.assertTrue(bool(jnp.isfinite(info["loss/total"])))
 
     def test_vmas_qp_is_finite(self):

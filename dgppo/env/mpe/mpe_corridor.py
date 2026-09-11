@@ -3,6 +3,7 @@ import jax.numpy as jnp
 from typing import Optional, Tuple
 
 from dgppo.env.mpe.base import MPEEnvState
+from dgppo.trainer.data import Rollout
 from dgppo.env.utils import get_node_goal_rng
 from dgppo.utils.graph import EdgeBlock, GraphsTuple
 from dgppo.utils.typing import Array, State
@@ -66,6 +67,16 @@ class MPECorridor(MPESpread):
         lower_lim = jnp.array([0.0, 0.0, -1.0, -1.0])
         upper_lim = jnp.array([self.area_size, self.area_size * 2, 1.0, 1.0])
         return lower_lim, upper_lim
+
+    def render_plot_bounds(
+            self, rollout: Rollout
+    ) -> Tuple[float, float, float, float]:
+        trajectory_y_max = float(jnp.max(rollout.graph.states[..., 1]))
+        visible_y_max = max(
+            self.area_size,
+            trajectory_y_max + self.params["car_radius"],
+        )
+        return 0.0, self.area_size, 0.0, visible_y_max
 
     def edge_blocks(self, state: MPEEnvState) -> list[EdgeBlock]:
         # agent - agent connection

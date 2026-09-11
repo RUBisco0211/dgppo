@@ -219,6 +219,8 @@ def render_mpe(
         viz_opts: dict = None,
         dpi: int = 100,
         n_goal: Optional[int] = None,
+        plot_bounds: Optional[Tuple[float, float, float, float]] = None,
+        task_goal_positions: Optional[Array] = None,
         **kwargs
 ):
     assert dim == 1 or dim == 2 or dim == 3
@@ -232,8 +234,10 @@ def render_mpe(
     else:
         fig = plt.figure(figsize=(10, 10), dpi=dpi)
         ax: Axes3D = fig.add_subplot(projection='3d')
-    ax.set_xlim(0., side_length)
-    ax.set_ylim(0., side_length)
+    if plot_bounds is None:
+        plot_bounds = (0.0, side_length, 0.0, side_length)
+    ax.set_xlim(plot_bounds[0], plot_bounds[1])
+    ax.set_ylim(plot_bounds[2], plot_bounds[3])
     if dim == 3:
         ax.set_zlim(0., side_length)
     ax.set(aspect="equal")
@@ -277,6 +281,34 @@ def render_mpe(
         plot_r = ax.transData.transform([r, 0])[0] - ax.transData.transform([0, 0])[0]
         agent_col = ax.scatter(n_pos[:, 0], n_pos[:, 1], n_pos[:, 2],
                                s=plot_r, c=n_color, zorder=5)  # todo: the size of the agent might not be correct
+
+    # MPELine and MPEFormation encode landmarks as graph nodes and derive the
+    # actual per-agent task goals from them. Draw those derived goals as rings.
+    task_goal_col = []
+    if task_goal_positions is not None and dim in (1, 2):
+        task_goal_positions = np.asarray(task_goal_positions, dtype=np.float32)
+        if dim == 1:
+            task_goal_positions = np.concatenate([
+                task_goal_positions,
+                np.ones((len(task_goal_positions), 1)) * side_length / 2,
+            ], axis=1)
+        task_goal_circs = [
+            plt.Circle(
+                position,
+                r,
+                facecolor="none",
+                edgecolor=goal_color,
+                linewidth=2.0,
+                linestyle="--",
+            )
+            for position in task_goal_positions
+        ]
+        task_goal_col = [
+            MutablePatchCollection(
+                task_goal_circs, match_original=True, zorder=5
+            )
+        ]
+        ax.add_collection(task_goal_col[0])
 
     # plot edges
     all_pos = graph0.states[:n_agent + n_goal + n_obs, :dim]
@@ -380,7 +412,7 @@ def render_mpe(
 
     # init function for animation
     def init_fn() -> list[plt.Artist]:
-        return [agent_col, edge_col, *agent_labels, cost_text, *safe_text, *cnt_col, kk_text]
+        return [agent_col, *task_goal_col, edge_col, *agent_labels, cost_text, *safe_text, *cnt_col, kk_text]
 
     # update function for animation
     def update(kk: int) -> list[plt.Artist]:
@@ -457,7 +489,7 @@ def render_mpe(
 
         kk_text.set_text("kk={:04}".format(kk))
 
-        return [agent_col, edge_col, *agent_labels, cost_text, *safe_text, *cnt_col_t, kk_text]
+        return [agent_col, *task_goal_col, edge_col, *agent_labels, cost_text, *safe_text, *cnt_col_t, kk_text]
 
     fps = 30.0
     spf = 1 / fps

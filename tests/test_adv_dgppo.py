@@ -128,6 +128,18 @@ class AdversarialDGPPOIntegrationTest(unittest.TestCase):
             all(np.isfinite(np.asarray(value)).all() for value in second_info.values())
         )
 
+    def test_mpe_rollout_and_update_are_supported(self):
+        env = make_env("MPESpread", 2, num_obs=1, max_step=1)
+        algo = self._make_algo(env)
+        rollout = algo.collect(algo.params, jr.split(jr.PRNGKey(17), 1))
+
+        info = algo.update(rollout, step=0)
+
+        self.assertEqual(rollout.actions.shape, (1, 1, 2, 2))
+        self.assertTrue(
+            all(np.isfinite(np.asarray(value)).all() for value in info.values())
+        )
+
     def test_checkpoint_restores_all_adversarial_training_state(self):
         env = make_env("LidarTarget", 2, num_obs=0, max_step=1)
         source = self._make_algo(env)

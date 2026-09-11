@@ -27,6 +27,8 @@ from dgppo.algo.module.deep_qp_safety import (
 from dgppo.env import make_env
 from dgppo.env.base import MultiAgentEnv
 from dgppo.env.lidar_env.base import LidarEnv
+from dgppo.env.mpe.base import MPE
+from dgppo.env.mpe.mpe_connect_spread import MPEConnectSpread
 from dgppo.env.vmas.vmas_navigation import VMASNavigation
 from dgppo.trainer.data import SafetyBatch
 from dgppo.trainer.safety_buffer import SafetyReplayBuffer
@@ -181,9 +183,13 @@ def train(args):
         max_step=args.rollout_steps,
         full_observation=args.full_observation,
     )
-    if not isinstance(env, (LidarEnv, VMASNavigation)):
+    if isinstance(env, MPEConnectSpread):
         raise ValueError(
-            "train_safety_filter.py currently targets LidarEnv and the "
+            "train_safety_filter.py does not yet support MPEConnectSpread"
+        )
+    if not isinstance(env, (LidarEnv, MPE, VMASNavigation)):
+        raise ValueError(
+            "train_safety_filter.py supports LidarEnv, MPE, and the "
             "VMASNavigation family"
         )
     print("> Graph-HJ safety constraint source: env.get_cost")

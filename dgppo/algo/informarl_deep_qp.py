@@ -23,6 +23,8 @@ from .module.deep_qp_safety import (
 )
 from .utils import compute_dec_ocp_gae
 from ..env.lidar_env.base import LidarEnv
+from ..env.mpe.base import MPE
+from ..env.mpe.mpe_connect_spread import MPEConnectSpread
 from ..env.vmas.vmas_navigation import VMASNavigation
 from ..trainer.data import Rollout
 from ..utils.typing import Array, Params
@@ -80,9 +82,13 @@ class InforMARLDeepQP(InforMARL):
             **kwargs,
     ):
         super().__init__(*args, train_steps=train_steps, **kwargs)
-        if not isinstance(self._env, (LidarEnv, VMASNavigation)):
+        if isinstance(self._env, MPEConnectSpread):
             raise ValueError(
-                "InforMARLDeepQP currently targets LidarEnv and the "
+                "InforMARLDeepQP does not yet support MPEConnectSpread."
+            )
+        if not isinstance(self._env, (LidarEnv, MPE, VMASNavigation)):
+            raise ValueError(
+                "InforMARLDeepQP supports LidarEnv, MPE, and the "
                 "VMASNavigation family."
             )
         if hj_cbf_alpha < 0.0:

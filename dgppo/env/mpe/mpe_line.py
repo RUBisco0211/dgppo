@@ -132,6 +132,10 @@ class MPELine(MPESpread):
             goals = landmarks[0] + jnp.arange(0, n_interval + 1)[:, None] * direction / n_interval
         return goals
 
+    def render_task_goal_positions(self, graph: MPEEnvGraphsTuple) -> Pos2d:
+        landmarks = graph.type_states(type_idx=1, n_type=self.num_goals)[:, :2]
+        return self.landmark2goal(landmarks)
+
     def get_reward(self, graph: MPEEnvGraphsTuple, action: Action) -> Reward:
         agent_states = graph.type_states(type_idx=0, n_type=self.num_agents)
         landmarks = graph.type_states(type_idx=1, n_type=self.num_goals)[:, :2]
