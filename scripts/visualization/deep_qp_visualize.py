@@ -23,9 +23,14 @@ from __future__ import annotations
 import argparse
 import os
 import pickle
+import sys
 from dataclasses import fields
 from pathlib import Path
 from typing import Any, Callable, Sequence
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
@@ -831,8 +836,8 @@ def _render_frame(
         0.985,
         (
             f"ego agent {ego_agent} | frame {frame_idx:02d}\n"
-            f"V={actual_value:+.4f}, c={actual_constraint:+.4f}\n"
-            f"sensing radius={env.params['comm_radius']:.2f}"
+            f"h={actual_value:+.4f}, fixed constraint={actual_constraint:+.4f}\n"
+            f"method=Deep-QP, graph=frozen"
         ),
         transform=ax.transAxes,
         ha="left",
@@ -857,7 +862,7 @@ def _render_frame(
         zorder=20,
     )
     colorbar = fig.colorbar(contour, ax=ax, fraction=0.046, pad=0.025)
-    colorbar.set_label("HJ value V (physical constraint units)")
+    colorbar.set_label("h (blue=safe, red=unsafe)")
 
     fig.canvas.draw()
     rgba = np.asarray(fig.canvas.buffer_rgba()).copy()

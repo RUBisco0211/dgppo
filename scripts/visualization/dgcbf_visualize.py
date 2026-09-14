@@ -7,11 +7,12 @@ renders ``h = -V_h`` for one channel, or ``h = -max_k V_h,k`` for the default
 worst-channel view.  Thus blue/positive is predicted safe and red/negative is
 predicted unsafe.
 
-At each rollout snapshot the selected ego's graph neighborhood and LiDAR
-returns are frozen while its position is swept over the global x-y grid.  The
-graph topology is not rebuilt at counterfactual grid positions, so agents and
-obstacles outside the snapshot sensing neighborhood remain visible but cannot
-enter the current certificate input.  One GIF is written per selected ego.
+By default, at each rollout snapshot the selected ego's graph neighborhood and
+LiDAR returns are frozen while its position is swept over the global x-y grid.
+This matches the GCBF+/Deep-QP contour scripts: objects outside the snapshot
+sensing neighborhood remain visible, but cannot enter the current certificate
+input.  ``--grid-graph-mode rebuild`` is available only as an extra diagnostic.
+One GIF is written per selected ego.
 
 Example
 -------
@@ -27,8 +28,13 @@ from __future__ import annotations
 import argparse
 import os
 import pickle
+import sys
 from pathlib import Path
 from typing import Any, Callable, NamedTuple, Sequence
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 os.environ.setdefault("TF_GPU_ALLOCATOR", "cuda_malloc_async")
@@ -282,6 +288,18 @@ def _move_ego_in_fixed_graph(
     )
 
 
+def _rebuild_graph_with_moved_ego(
+    graph, env: LidarEnv, ego_agent: int, xy: jax.Array
+):
+    """Move ego and rebuild the LiDAR graph as it would be observed there."""
+
+    state = graph.env_states
+    agents = state.agent.at[ego_agent, :2].set(xy)
+    env_state = state._replace(agent=agents)
+    lidar_data = env.get_lidar_data(agents, env_state.obstacle)
+    return env.get_graph(env_state, lidar_data)
+
+
 def _encode_environment_cost(raw_cost: jax.Array) -> jax.Array:
     cost = jnp.where(raw_cost <= 0.0, raw_cost - 0.5, raw_cost + 0.5)
     return jnp.clip(cost, a_min=-1.0, a_max=1.0)
@@ -353,15 +371,22 @@ def _make_grid_evaluator(
     vh_params,
     ego_agent: int,
     cost_channel: str,
+    grid_graph_mode: str,
 ) -> Callable:
     def evaluate_one(
         xy: jax.Array,
         base_graph,
         rnn_state: jax.Array,
     ) -> jax.Array:
-        graph = _move_ego_in_fixed_graph(base_graph, env, ego_agent, xy)
+        if grid_graph_mode == "rebuild":
+            graph = _rebuild_graph_with_moved_ego(base_graph, env, ego_agent, xy)
+            native_cost = env.get_cost(graph)[ego_agent]
+        elif grid_graph_mode == "frozen":
+            graph = _move_ego_in_fixed_graph(base_graph, env, ego_agent, xy)
+            native_cost = _fixed_ego_cost(env, graph, ego_agent)
+        else:
+            raise ValueError(f"unsupported grid graph mode: {grid_graph_mode}")
         raw_vh, _ = algo.Vh.get_value(vh_params, graph, rnn_state)
-        native_cost = _fixed_ego_cost(env, graph, ego_agent)
         return jnp.stack(
             [
                 _safe_value(raw_vh[ego_agent], cost_channel),
@@ -522,6 +547,7 @@ def _render_frame(
     env: LidarEnv,
     cost_channel: str,
     rnn_state_mode: str,
+    grid_graph_mode: str,
     show_goals: bool,
     show_clearance: bool,
     dpi: int,
@@ -655,15 +681,18 @@ def _render_frame(
     actual_value = value_grid[nearest_y, nearest_x]
     actual_clearance = clearance_grid[nearest_y, nearest_x]
     actual_channels = channel_grid[nearest_y, nearest_x]
+    constraint_label = (
+        "env constraint" if grid_graph_mode == "rebuild" else "fixed constraint"
+    )
     ax.text(
         0.015,
         0.985,
         (
             f"ego agent {ego_agent} | frame {frame_idx:02d}\n"
-            f"h={actual_value:+.4f}, fixed constraint={actual_clearance:+.4f}\n"
+            f"h={actual_value:+.4f}, {constraint_label}={actual_clearance:+.4f}\n"
             f"raw Vh(agent/obs)={actual_channels[0]:+.3f}/"
             f"{actual_channels[1]:+.3f}\n"
-            f"channel={cost_channel}, RNN={rnn_state_mode}"
+            f"channel={cost_channel}, RNN={rnn_state_mode}, graph={grid_graph_mode}"
         ),
         transform=ax.transAxes,
         ha="left",
@@ -688,10 +717,7 @@ def _render_frame(
         zorder=20,
     )
     colorbar = fig.colorbar(contour, ax=ax, fraction=0.046, pad=0.025)
-    colorbar.set_label(
-        "safe-positive DGPPO value h "
-        f"({_channel_formula(cost_channel)})"
-    )
+    colorbar.set_label("h (blue=safe, red=unsafe)")
 
     fig.canvas.draw()
     rgba = np.asarray(fig.canvas.buffer_rgba()).copy()
@@ -759,7 +785,12 @@ def visualize(args: argparse.Namespace) -> list[Path]:
     grid_points = jnp.asarray(np.stack([x_grid.ravel(), y_grid.ravel()], axis=-1))
     evaluators = {
         ego: _make_grid_evaluator(
-            env, algo, vh_params, ego, args.cost_channel
+            env,
+            algo,
+            vh_params,
+            ego,
+            args.cost_channel,
+            args.grid_graph_mode,
         )
         for ego in ego_agents
     }
@@ -794,6 +825,7 @@ def visualize(args: argparse.Namespace) -> list[Path]:
                     env=env,
                     cost_channel=args.cost_channel,
                     rnn_state_mode=args.rnn_state_mode,
+                    grid_graph_mode=args.grid_graph_mode,
                     show_goals=args.show_goals,
                     show_clearance=args.show_clearance,
                     dpi=args.dpi,
@@ -810,6 +842,7 @@ def visualize(args: argparse.Namespace) -> list[Path]:
         f"eval_agents={env.num_agents}, "
         f"source_obs={_cfg_get(config, 'obs')}, eval_obs={env.params['n_obs']}, "
         f"channel={args.cost_channel}, RNN={args.rnn_state_mode}, "
+        f"grid_graph_mode={args.grid_graph_mode}, "
         f"grid_batch_size={args.grid_batch_size}, "
         f"value_limit=±{value_limit:.5f}",
         flush=True,
@@ -854,6 +887,15 @@ def parse_args() -> argparse.Namespace:
         choices=("rollout", "zero"),
         default="rollout",
         help="use captured rollout history or a zero hidden state for contours",
+    )
+    parser.add_argument(
+        "--grid-graph-mode",
+        choices=("rebuild", "frozen"),
+        default="frozen",
+        help=(
+            "keep the rollout snapshot graph frozen like GCBF+/Deep-QP, or "
+            "rebuild LiDAR/graph at each counterfactual grid point for diagnostics"
+        ),
     )
     parser.add_argument(
         "--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR

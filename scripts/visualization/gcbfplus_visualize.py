@@ -18,8 +18,13 @@ from __future__ import annotations
 import argparse
 import os
 import pickle
+import sys
 from pathlib import Path
 from typing import Any, Callable, Sequence
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 os.environ.setdefault("TF_GPU_ALLOCATOR", "cuda_malloc_async")
@@ -483,17 +488,27 @@ def _render_frame(
     fig, ax = plt.subplots(figsize=(8.2, 7.0), dpi=args.dpi)
     fig.subplots_adjust(left=0.025, right=0.90, bottom=0.025, top=0.975)
     levels = np.linspace(-value_limit, value_limit, 17)
+    norm = TwoSlopeNorm(vmin=-value_limit, vcenter=0.0, vmax=value_limit)
     contour = ax.contourf(
         x_grid,
         y_grid,
         np.clip(value_grid, -value_limit, value_limit),
         levels=levels,
         cmap=get_BuRd().reversed(),
-        norm=TwoSlopeNorm(vmin=-value_limit, vcenter=0.0, vmax=value_limit),
+        norm=norm,
         extend="both",
         alpha=0.88,
+        zorder=0,
     )
-    _zero_contour(ax, x_grid, y_grid, value_grid, colors="black", linewidths=1.7)
+    _zero_contour(
+        ax,
+        x_grid,
+        y_grid,
+        value_grid,
+        colors="black",
+        linewidths=1.7,
+        zorder=5,
+    )
     if args.show_clearance:
         _zero_contour(
             ax,
@@ -503,25 +518,39 @@ def _render_frame(
             colors="#3f3f3f",
             linestyles="--",
             linewidths=1.2,
+            zorder=4,
         )
     _draw_scene(ax, algo._env, graph, algo.adapter, ego_agent, args.show_goals)
     xmin, xmax, ymin, ymax = algo.adapter.plot_bounds
     ax.set(xlim=(xmin, xmax), ylim=(ymin, ymax))
     ax.set_aspect("equal", adjustable="box")
     ax.set_axis_off()
+    positions = np.asarray(algo.adapter.agent_positions(graph))
+    ego_position = positions[ego_agent]
+    nearest_x = np.abs(x_grid[0] - ego_position[0]).argmin()
+    nearest_y = np.abs(y_grid[:, 0] - ego_position[1]).argmin()
+    actual_value = value_grid[nearest_y, nearest_x]
+    actual_clearance = clearance_grid[nearest_y, nearest_x]
+    constraint_label = (
+        "fixed constraint" if isinstance(algo._env, LidarEnv) else "env constraint"
+    )
     ax.text(
-        0.02,
-        0.98,
-        f"{certificate_label} · {type(algo._env).__name__}\nego {ego_agent} · frame {frame_index:02d}",
+        0.015,
+        0.985,
+        (
+            f"ego agent {ego_agent} | frame {frame_index:02d}\n"
+            f"h={actual_value:+.4f}, {constraint_label}={actual_clearance:+.4f}\n"
+            f"method={certificate_label}"
+        ),
         transform=ax.transAxes,
         ha="left",
         va="top",
-        fontsize=8,
-        color="#303030",
+        fontsize=9,
+        bbox={"facecolor": "white", "alpha": 0.82, "edgecolor": "#777777"},
         zorder=20,
     )
     colorbar = fig.colorbar(contour, ax=ax, fraction=0.046, pad=0.025)
-    colorbar.set_label("GCBF h (positive=safe)")
+    colorbar.set_label("h (blue=safe, red=unsafe)")
     fig.canvas.draw()
     image = Image.fromarray(np.asarray(fig.canvas.buffer_rgba()).copy(), mode="RGBA")
     plt.close(fig)
