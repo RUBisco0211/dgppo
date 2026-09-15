@@ -160,13 +160,37 @@ def test(args):
         cost = env.get_cost(graph_)
         return jnp.any(cost >= 0.0, axis=-1)
 
+    def reach_mask(graph_: GraphsTuple) -> Array:
+        agent_pos = graph_.type_states(
+            type_idx=0, n_type=env.num_agents
+        )[:, :2]
+        env_name = env.__class__.__name__
+
+        if env_name in {"MPEFormation", "MPELine"}:
+            goal_pos = env.render_task_goal_positions(graph_)
+        elif env_name == "LidarLine":
+            landmarks = graph_.type_states(type_idx=1, n_type=env.num_goals)[:, :2]
+            goal_pos = env.landmark2goal(landmarks)
+        else:
+            goal_pos = graph_.type_states(type_idx=1, n_type=env.num_goals)[:, :2]
+
+        if env_name in {"MPETarget", "LidarTarget", "LidarBicycleTarget"}:
+            distance = jnp.linalg.norm(agent_pos - goal_pos, axis=-1)
+        else:
+            distance = jnp.linalg.norm(
+                goal_pos[:, None, :] - agent_pos[None, :, :], axis=-1
+            ).min(axis=1)
+        return distance <= env.params["dist2goal"]
+
     is_unsafe_fn = jax_jit_np(jax_vmap(unsafe_mask))
+    is_reached_fn = jax_jit_np(jax_vmap(reach_mask))
 
     # test results
     rewards = []
     costs = []
     rollouts = []
     is_unsafes = []
+    is_reached = []
     rates = []
 
     # test
@@ -174,6 +198,7 @@ def test(args):
         key_x0, _ = jr.split(test_keys[i_epi], 2)
         rollout = rollout_fn(key_x0)
         is_unsafes.append(is_unsafe_fn(rollout.graph))
+        is_reached.append(is_reached_fn(rollout.graph))
 
         epi_reward = rollout.rewards.sum()
         epi_cost = rollout.costs.max()
@@ -181,17 +206,27 @@ def test(args):
         costs.append(epi_cost)
         rollouts.append(rollout)
         safe_rate = 1 - is_unsafes[-1].max(axis=0).mean()
-        print(f"epi: {i_epi}, reward: {epi_reward:.3f}, cost: {epi_cost:.3f}, safe rate: {safe_rate * 100:.3f}%")
+        reach_rate = is_reached[-1].max(axis=0).mean()
+        print(
+            f"epi: {i_epi}, reward: {epi_reward:.3f}, cost: {epi_cost:.3f}, "
+            f"safe rate: {safe_rate * 100:.3f}%, "
+            f"reach rate: {reach_rate * 100:.3f}%"
+        )
 
-        rates.append(np.array(safe_rate))
+        rates.append(np.array([safe_rate, reach_rate]))
 
     is_unsafe = np.max(np.stack(is_unsafes), axis=1)
+    reached = np.max(np.stack(is_reached), axis=1)
     safe_mean, safe_std = (1 - is_unsafe).mean(), (1 - is_unsafe).std()
+    episode_safe_rates = 1.0 - is_unsafe.mean(axis=1)
+    reach_mean, reach_std = reached.mean(), reached.std()
+    episode_reach_rates = reached.mean(axis=1)
 
     print(
         f"reward: {np.mean(rewards):.3f}, min/max reward: {np.min(rewards):.3f}/{np.max(rewards):.3f}, "
         f"cost: {np.mean(costs):.3f}, min/max cost: {np.min(costs):.3f}/{np.max(costs):.3f}, "
-        f"safe_rate: {safe_mean * 100:.3f}%"
+        f"safe_rate: {safe_mean * 100:.3f}%, "
+        f"reach_rate: {reach_mean * 100:.3f}%"
     )
 
     # save results
@@ -199,20 +234,36 @@ def test(args):
         with open(os.path.join(path, "test_log.csv"), "a") as f:
             f.write(f"{env.num_agents},{args.epi},{env.max_episode_steps},"
                     f"{env.area_size},{env.params['n_obs']},"
-                    f"{safe_mean * 100:.3f},{safe_std * 100:.3f}\n")
+                    f"{safe_mean * 100:.3f},{safe_std * 100:.3f},"
+                    f"{reach_mean * 100:.3f},{reach_std * 100:.3f}\n")
+
+    result = {
+        "env": env.__class__.__name__,
+        "num_agents": env.num_agents,
+        "max_episode_steps": env.max_episode_steps,
+        "episode_safe_rates": np.asarray(episode_safe_rates),
+        "episode_reach_rates": np.asarray(episode_reach_rates),
+        "agent_safe": 1 - np.asarray(is_unsafe),
+        "task_reached": np.asarray(reached),
+        "reach_threshold": float(env.params["dist2goal"]),
+    }
 
     # make video
     if args.no_video:
-        return
+        return result
 
     videos_dir = pathlib.Path(path) / "videos" / f"{step}"
     videos_dir.mkdir(exist_ok=True, parents=True)
     for ii, (rollout, Ta_is_unsafe) in enumerate(zip(rollouts, is_unsafes)):
-        safe_rate = rates[ii] * 100
-        video_name = f"n{num_agents}_epi{ii:02}_reward{rewards[ii]:.3f}_cost{costs[ii]:.3f}_sr{safe_rate:.0f}"
+        safe_rate, reach_rate = rates[ii] * 100
+        video_name = (
+            f"n{num_agents}_epi{ii:02}_reward{rewards[ii]:.3f}_"
+            f"cost{costs[ii]:.3f}_sr{safe_rate:.0f}_rr{reach_rate:.0f}"
+        )
         viz_opts = {}
         video_path = videos_dir / f"{stamp_str}_{video_name}.mp4"
         env.render_video(rollout, video_path, Ta_is_unsafe, viz_opts, dpi=args.dpi)
+    return result
 
 
 def main():

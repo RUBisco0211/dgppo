@@ -14,16 +14,33 @@ python train.py --env LidarSpread --algo dgppo -n 3 --obs 3 \
 # 两阶段 Deep-QP 训练：先预训练 Graph-HJ，再训练带约束的 InforMARL。
 # python train.py --env LidarSpread --algo deepqp -n 3 --obs 3
 
-# MPE 训练使用 100,000 次 RL 迭代（默认 200,000 次的一半）。
-# MPETarget、MPESpread、MPEFormation、MPELine 和 MPECorridor
-# 同时支持 DGPPO 与 Deep-QP；请将 ALGO 替换为 dgppo 或 deepqp。
-# python train.py --env MPETarget --algo ALGO -n 3 --obs 3 --steps 100000
-# python train.py --env MPESpread --algo ALGO -n 3 --obs 3 --steps 100000
-# python train.py --env MPEFormation --algo ALGO -n 3 --obs 3 --steps 100000
-# python train.py --env MPELine --algo ALGO -n 3 --obs 3 --steps 100000
-# python train.py --env MPECorridor --algo ALGO -n 3 --obs 2 --steps 100000
-# MPEConnectSpread 目前仅支持 DGPPO。
+# MPE 的 DGPPO 训练使用 100,000 次 RL 迭代。
+# python train.py --env MPETarget --algo dgppo -n 3 --obs 3 --steps 100000
+# python train.py --env MPESpread --algo dgppo -n 3 --obs 3 --steps 100000
+# python train.py --env MPEFormation --algo dgppo -n 3 --obs 3 --steps 100000
+# python train.py --env MPELine --algo dgppo -n 3 --obs 3 --steps 100000
+# python train.py --env MPECorridor --algo dgppo -n 3 --obs 2 --steps 100000
 # python train.py --env MPEConnectSpread --algo dgppo -n 3 --obs 1 --steps 100000
+
+# MPE 的 Deep-QP 训练使用 50,000 次 Graph-HJ 预训练更新和 100,000 次 RL 迭代。
+# MPEConnectSpread 目前不支持 Deep-QP。
+# python train.py --env MPETarget --algo deepqp -n 3 --obs 3 --deep-qp-pretrain-steps 50000 --steps 100000
+# python train.py --env MPESpread --algo deepqp -n 3 --obs 3 --deep-qp-pretrain-steps 50000 --steps 100000
+# python train.py --env MPEFormation --algo deepqp -n 3 --obs 3 --deep-qp-pretrain-steps 50000 --steps 100000
+# python train.py --env MPELine --algo deepqp -n 3 --obs 3 --deep-qp-pretrain-steps 50000 --steps 100000
+# python train.py --env MPECorridor --algo deepqp -n 3 --obs 2 --deep-qp-pretrain-steps 50000 --steps 100000
+
+# 评估 MPE/Lidar 的 safety rate 和 reach rate。脚本会自动读取指定环境与算法
+# 目录下的全部 seed；每个 seed 默认在相同的 32 个初始条件上执行确定性策略。
+# reach rate 使用环境的 dist2goal 阈值，并统计整条轨迹中曾到达目标的任务比例。
+# 普通训练目录和 Deep-QP 两阶段训练目录都会自动解析。
+# python scripts/safety_rate_eval.py \
+#   --env-log-dir "logs/MPESpread" \
+#   --algo dgppo
+# Lidar 环境的用法相同，例如：
+# python scripts/safety_rate_eval.py \
+#   --env-log-dir "logs/LidarSpread" \
+#   --algo deepqp
 
 # 仅训练 GCBF 证书，不训练 actor/policy 网络。
 python train_gcbf.py --env LidarSpread -n 3 --obs 3
