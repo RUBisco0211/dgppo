@@ -53,6 +53,13 @@ def _cost_metrics(costs, prefix: str, cost_components):
         f"{prefix}/cost/cost_mean": float(positive_costs.mean()),
         f"{prefix}/cost/cost_max": float(positive_costs.max()),
     }
+    if positive_costs.ndim >= 1:
+        # Fraction of agent-time samples with at least one active constraint.
+        # Unlike unsafe_rate below, this measures the supply of violating
+        # transitions available to a feasibility critic.
+        metrics[f"{prefix}/safety/violation_rate"] = float(
+            (positive_costs.max(axis=-1) > 0.0).mean()
+        )
     if positive_costs.ndim > 1:
         per_episode_cost = positive_costs.max(axis=tuple(range(1, positive_costs.ndim)))
         metrics[f"{prefix}/safety/unsafe_rate"] = float((per_episode_cost > 0).mean())
@@ -322,6 +329,11 @@ class Trainer:
                         "eval/unsafe_frac": unsafe_frac,
                     }
                     eval_info |= _rollout_metrics(test_rollouts, "eval", self.env_test.cost_components)
+                    if hasattr(self.algo, "diagnostic_metrics"):
+                        # Diagnostics are read-only and reuse the fixed-seed eval
+                        # rollout.  They must not consume the training PRNG stream
+                        # or participate in any parameter update.
+                        eval_info |= self.algo.diagnostic_metrics(test_rollouts)
                     self.best_eval_reward = max(
                         self.best_eval_reward,
                         eval_info["eval/reward/episode_reward_mean"],

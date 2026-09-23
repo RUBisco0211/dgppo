@@ -133,6 +133,68 @@ class DGPPO(InforMARLLagr):
         Vh, _ = self.Vh.get_value(params["Vh"], graph, rnn_state)
         return Vh
 
+    def diagnostic_metrics(self, rollout: Rollout) -> dict:
+        """Evaluate Vh on held-out deterministic rollouts without changing training.
+
+        The empirical target is the maximum observed cost from each time step to
+        the end of the rollout.  It is deliberately independent of the learned
+        bootstrap target. Together with the training-rollout violation rate,
+        it exposes whether violating training samples disappear while errors
+        on held-out future-unsafe states increase.
+        """
+        predicted = jax.vmap(jax.vmap(ft.partial(
+            self.get_Vh, params={"Vh": self.Vh_train_state.params}
+        )))(rollout.graph, rollout.rnn_states)
+        costs = jnp.maximum(rollout.costs, 0.0)
+
+        def reverse_future_max(next_max, current_cost):
+            current_max = jnp.maximum(current_cost, next_max)
+            return current_max, current_max
+
+        _, future_max_reversed = jax.lax.scan(
+            reverse_future_max,
+            jnp.zeros_like(costs[:, -1]),
+            jnp.swapaxes(costs, 0, 1)[::-1],
+        )
+        future_max = jnp.swapaxes(future_max_reversed[::-1], 0, 1)
+
+        squared_error = jnp.square(predicted - future_max)
+        unsafe = future_max > 1e-6
+        safe = ~unsafe
+        violating_now = costs > 1e-6
+        unsafe_count = unsafe.sum()
+        safe_count = safe.sum()
+        unsafe_denominator = jnp.maximum(unsafe_count, 1)
+        safe_denominator = jnp.maximum(safe_count, 1)
+        underestimation = jnp.maximum(future_max - predicted, 0.0)
+        zero_false_negative = unsafe & (predicted <= 0.0)
+        dgcbf_false_negative = unsafe & (predicted <= self.cbf_eps)
+
+        return {
+            "eval/safety_paradox/violation_transition_rate": violating_now.mean(),
+            "eval/safety_paradox/future_unsafe_rate": unsafe.mean(),
+            "eval/safety_paradox/future_unsafe_count": unsafe_count,
+            "eval/safety_paradox/future_max_mse": squared_error.mean(),
+            "eval/safety_paradox/future_max_mse_unsafe": (
+                jnp.where(unsafe, squared_error, 0.0).sum() / unsafe_denominator
+            ),
+            "eval/safety_paradox/future_max_mse_safe": (
+                jnp.where(safe, squared_error, 0.0).sum() / safe_denominator
+            ),
+            "eval/safety_paradox/unsafe_underestimate_mean": (
+                jnp.where(unsafe, underestimation, 0.0).sum() / unsafe_denominator
+            ),
+            "eval/safety_paradox/zero_threshold_false_negative_rate": (
+                zero_false_negative.sum() / unsafe_denominator
+            ),
+            "eval/safety_paradox/dgcbf_threshold": jnp.asarray(self.cbf_eps),
+            "eval/safety_paradox/dgcbf_false_negative_rate": (
+                dgcbf_false_negative.sum() / unsafe_denominator
+            ),
+            "eval/safety_paradox/predicted_mean": predicted.mean(),
+            "eval/safety_paradox/target_mean": future_max.mean(),
+        }
+
     def update(self, rollout: Rollout, step: int) -> dict:
         key, self.key = jr.split(self.key)
 
