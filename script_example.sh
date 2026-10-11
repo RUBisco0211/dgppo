@@ -32,15 +32,16 @@ python train.py --env LidarSpread --algo dgppo -n 3 --obs 3 \
 
 # 评估 MPE/Lidar 的 safety rate 和 reach rate。脚本会自动读取指定环境与算法
 # 目录下的全部 seed；每个 seed 默认在相同的 32 个初始条件上执行确定性策略。
-# reach rate 使用环境的 dist2goal 阈值，并统计整条轨迹中曾到达目标的任务比例。
+# reach rate 默认使用环境的 dist2goal 阈值，并统计整条轨迹中曾到达目标的任务比例。
+# 如需做阈值敏感性分析，可额外传入 --reach-threshold 0.1。
 # 普通训练目录和 Deep-QP 两阶段训练目录都会自动解析。
 # python scripts/safety_rate_eval.py \
 #   --env-log-dir "logs/MPESpread" \
-#   --algo dgppo
+#   --algo dgppo deepqp
 # Lidar 环境的用法相同，例如：
 # python scripts/safety_rate_eval.py \
 #   --env-log-dir "logs/LidarSpread" \
-#   --algo deepqp
+#   --algo dgppo deepqp
 
 # 仅训练 GCBF 证书，不训练 actor/policy 网络。
 python train_gcbf.py --env LidarSpread -n 3 --obs 3

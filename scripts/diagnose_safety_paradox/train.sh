@@ -1,5 +1,5 @@
 env -u LD_LIBRARY_PATH \
-CUDA_VISIBLE_DEVICES=0 \
+CUDA_VISIBLE_DEVICES=1 \
 JAX_PLATFORMS=cuda \
 python train.py \
   --env MPELine \

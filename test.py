@@ -12,6 +12,7 @@ import numpy as np
 import yaml
 
 from dgppo.algo import make_algo
+from dgppo.algo.informarl import InforMARL
 from dgppo.env import make_env
 from dgppo.trainer.utils import test_rollout
 from dgppo.utils.graph import GraphsTuple
@@ -42,6 +43,11 @@ def test(args):
         env_id=config.env if args.env is None else args.env,
         num_agents=num_agents,
         num_obs=config.obs if args.obs is None else args.obs,
+        n_rays=(
+            getattr(config, "n_rays", None)
+            if config.env.startswith("Lidar")
+            else None
+        ),
         max_step=args.max_step,
         full_observation=args.full_observation,
     )
@@ -81,6 +87,14 @@ def test(args):
         use_rnn=config.use_rnn,
         rnn_layers=config.rnn_layers,
         use_lstm=config.use_lstm,
+        pairwise_cbf_mode=getattr(config, "pairwise_cbf_mode", "certificate"),
+        pairwise_cbf_alpha1=getattr(config, "pairwise_cbf_alpha1", 3.0),
+        pairwise_cbf_alpha2=getattr(config, "pairwise_cbf_alpha2", 3.0),
+        pairwise_cbf_safety_margin=getattr(config, "pairwise_cbf_safety_margin", 0.0),
+        pairwise_cbf_sensing_radius=getattr(config, "pairwise_cbf_sensing_radius", None),
+        pairwise_cbf_slack_penalty=getattr(config, "pairwise_cbf_slack_penalty", 1e6),
+        pairwise_cbf_witness_fallback=getattr(config, "pairwise_cbf_witness_fallback", False),
+        cbf_action_loss_coef=getattr(config, "cbf_action_loss_coef", 1.0),
         deep_qp_gnn_layers=getattr(config, "deep_qp_gnn_layers", 1),
         deep_qp_gnn_out_dim=getattr(config, "deep_qp_gnn_out_dim", 64),
         deep_qp_hidden_dim=getattr(config, "deep_qp_hidden_dim", 256),
@@ -132,7 +146,10 @@ def test(args):
         gcbf_qp_chunk_size=getattr(config, "gcbf_qp_chunk_size", 32),
         gcbf_unsafe_fraction=getattr(config, "gcbf_unsafe_fraction", 0.5),
     )
-    algo.load(model_path, step)
+    if getattr(args, "policy_only", False) and config.algo == "informarl_deep_qp":
+        InforMARL.load(algo, model_path, step)
+    else:
+        algo.load(model_path, step)
     if args.stochastic:
         def act_fn(graph, rnn_state, key):
             action, _, new_rnn_state = algo.step(graph, rnn_state, key)
@@ -155,12 +172,16 @@ def test(args):
                             init_rnn_state,
                             stochastic=args.stochastic)
     rollout_fn = jax_jit_np(rollout_fn)
+    if hasattr(algo, "eval_rollout_host"):
+        def rollout_fn(key):
+            result = algo.eval_rollout_host(env, algo.params, key, stochastic=args.stochastic)
+            return jax.tree_util.tree_map(np.asarray, result)
 
     def unsafe_mask(graph_: GraphsTuple) -> Array:
         cost = env.get_cost(graph_)
         return jnp.any(cost >= 0.0, axis=-1)
 
-    def reach_mask(graph_: GraphsTuple) -> Array:
+    def task_goal_distance(graph_: GraphsTuple) -> Array:
         agent_pos = graph_.type_states(
             type_idx=0, n_type=env.num_agents
         )[:, :2]
@@ -180,10 +201,17 @@ def test(args):
             distance = jnp.linalg.norm(
                 goal_pos[:, None, :] - agent_pos[None, :, :], axis=-1
             ).min(axis=1)
-        return distance <= env.params["dist2goal"]
+        return distance
+
+    def reach_mask(graph_: GraphsTuple) -> Array:
+        reach_threshold = getattr(args, "reach_threshold", None)
+        if reach_threshold is None:
+            reach_threshold = env.params["dist2goal"]
+        return task_goal_distance(graph_) <= reach_threshold
 
     is_unsafe_fn = jax_jit_np(jax_vmap(unsafe_mask))
     is_reached_fn = jax_jit_np(jax_vmap(reach_mask))
+    task_goal_distance_fn = jax_jit_np(jax_vmap(task_goal_distance))
 
     # test results
     rewards = []
@@ -191,6 +219,7 @@ def test(args):
     rollouts = []
     is_unsafes = []
     is_reached = []
+    task_goal_distances = []
     rates = []
 
     # test
@@ -199,6 +228,7 @@ def test(args):
         rollout = rollout_fn(key_x0)
         is_unsafes.append(is_unsafe_fn(rollout.graph))
         is_reached.append(is_reached_fn(rollout.graph))
+        task_goal_distances.append(task_goal_distance_fn(rollout.graph))
 
         epi_reward = rollout.rewards.sum()
         epi_cost = rollout.costs.max()
@@ -217,6 +247,7 @@ def test(args):
 
     is_unsafe = np.max(np.stack(is_unsafes), axis=1)
     reached = np.max(np.stack(is_reached), axis=1)
+    task_min_distances = np.min(np.stack(task_goal_distances), axis=1)
     safe_mean, safe_std = (1 - is_unsafe).mean(), (1 - is_unsafe).std()
     episode_safe_rates = 1.0 - is_unsafe.mean(axis=1)
     reach_mean, reach_std = reached.mean(), reached.std()
@@ -245,7 +276,12 @@ def test(args):
         "episode_reach_rates": np.asarray(episode_reach_rates),
         "agent_safe": 1 - np.asarray(is_unsafe),
         "task_reached": np.asarray(reached),
-        "reach_threshold": float(env.params["dist2goal"]),
+        "task_min_distances": np.asarray(task_min_distances),
+        "reach_threshold": float(
+            env.params["dist2goal"]
+            if getattr(args, "reach_threshold", None) is None
+            else args.reach_threshold
+        ),
     }
 
     # make video
@@ -284,6 +320,7 @@ def main():
     parser.add_argument("--debug", action="store_true", default=False)
     parser.add_argument("--cpu", action="store_true", default=False)
     parser.add_argument("--max-step", type=int, default=None)
+    parser.add_argument("--reach-threshold", type=float, default=None)
     parser.add_argument("--log", action="store_true", default=False)
 
     # default arguments

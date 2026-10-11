@@ -86,8 +86,31 @@ def _has_checkpoint(run_dir: Path, step: str | None) -> bool:
     )
 
 
+def _checkpoint_progress(run_dir: Path, step: str | None) -> int | None:
+    model_dir = run_dir / "models"
+    if step is None:
+        if (model_dir / "latest").is_dir():
+            checkpoint_dir = model_dir / "latest"
+        else:
+            numeric_steps = [
+                int(path.name)
+                for path in model_dir.iterdir()
+                if path.is_dir() and path.name.isdigit()
+            ]
+            return max(numeric_steps, default=None)
+    else:
+        checkpoint_dir = model_dir / step
+
+    markers = list(checkpoint_dir.glob("latest_iter_*.txt"))
+    if markers:
+        return max(int(path.stem.rsplit("_", 1)[-1]) for path in markers)
+    if checkpoint_dir.name.isdigit():
+        return int(checkpoint_dir.name)
+    return None
+
+
 def _discover_run_dirs(
-    env_log_dir: str, algo: str, step: str | None
+    env_log_dir: str, algo: str, step: str | None, complete_only: bool
 ) -> tuple[list[Path], list[Path]]:
     env_dir = Path(env_log_dir).expanduser().resolve()
     if not env_dir.is_dir():
@@ -112,10 +135,16 @@ def _discover_run_dirs(
         except FileNotFoundError:
             skipped_dirs.append(seed_dir)
             continue
-        if _has_checkpoint(run_dir, step):
-            run_dirs.append(run_dir)
-        else:
+        if not _has_checkpoint(run_dir, step):
             skipped_dirs.append(seed_dir)
+            continue
+        if complete_only:
+            config = _load_config(run_dir)
+            progress = _checkpoint_progress(run_dir, step)
+            if progress is None or progress < int(config.steps):
+                skipped_dirs.append(seed_dir)
+                continue
+        run_dirs.append(run_dir)
 
     if not run_dirs:
         checkpoint = step if step is not None else "latest or numeric"
@@ -143,64 +172,77 @@ def _evaluation_args(args, run_dir: Path) -> argparse.Namespace:
         env=None,
         offset=0,
         dpi=100,
+        policy_only=True,
+        reach_threshold=args.reach_threshold,
     )
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Discover every seed under an environment/algorithm log directory, "
-            "evaluate them on the same initial conditions, and report safety "
-            "and task reach rates."
+def _display_name(algo: str) -> str:
+    return {"dgppo": "DGPPO", "deepqp": "Deep-QP"}.get(algo, algo)
+
+
+def _plot_summaries(env_name: str, summaries: list[dict], path: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    markers = ("o", "s", "^", "D", "P", "X")
+    fig, ax = plt.subplots(figsize=(3.4, 3.0), dpi=200)
+    for index, summary in enumerate(summaries):
+        ax.errorbar(
+            summary["reach_mean"],
+            summary["safety_mean"],
+            xerr=summary["reach_std"],
+            yerr=summary["safety_std"],
+            marker=markers[index % len(markers)],
+            markersize=5,
+            capsize=3,
+            linewidth=1.2,
+            label=summary["label"],
         )
-    )
-    parser.add_argument(
-        "--env-log-dir",
-        required=True,
-        help="environment log directory, for example logs/MPESpread",
-    )
-    parser.add_argument(
-        "--algo",
-        required=True,
-        help="algorithm subdirectory name, for example dgppo or deepqp",
-    )
-    parser.add_argument(
-        "--episodes",
-        type=int,
-        default=32,
-        help="evaluation initial conditions per trained seed (default: 32)",
-    )
-    parser.add_argument(
-        "--eval-seed",
-        type=int,
-        default=1234,
-        help="seed used to generate the shared evaluation initial conditions",
-    )
-    parser.add_argument(
-        "--step",
-        default=None,
-        help="checkpoint directory name for every run (default: latest)",
-    )
-    parser.add_argument("--max-step", type=int, default=None)
-    parser.add_argument("--stochastic", action="store_true", default=False)
-    parser.add_argument("--full-observation", action="store_true", default=False)
-    parser.add_argument("--cpu", action="store_true", default=False)
-    args = parser.parse_args()
 
-    if args.episodes <= 0:
-        parser.error("--episodes must be positive")
-    if args.episodes > 1_000:
-        parser.error("--episodes must not exceed 1000")
+    reach_bounds = [
+        value
+        for summary in summaries
+        for value in (
+            summary["reach_mean"] - summary["reach_std"],
+            summary["reach_mean"] + summary["reach_std"],
+        )
+    ]
+    safety_bounds = [
+        value
+        for summary in summaries
+        for value in (
+            summary["safety_mean"] - summary["safety_std"],
+            summary["safety_mean"] + summary["safety_std"],
+        )
+    ]
 
-    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-    if args.cpu:
-        os.environ["JAX_PLATFORM_NAME"] = "cpu"
-        os.environ["JAX_PLATFORMS"] = "cpu"
+    def padded_limits(bounds: list[float]) -> tuple[float, float]:
+        lower = min(0.0, *bounds)
+        upper = max(1.0, *bounds)
+        padding = max(0.03, 0.05 * (upper - lower))
+        return lower - padding, upper + padding
 
+    ax.set(xlabel="Reach rate", ylabel="Safety rate", title=env_name)
+    ax.set_xlim(*padded_limits(reach_bounds))
+    ax.set_ylim(*padded_limits(safety_bounds))
+    ax.set_xticks(np.linspace(0.0, 1.0, 6))
+    ax.set_yticks(np.linspace(0.0, 1.0, 6))
+    ax.grid(True, linestyle="--", linewidth=0.6, alpha=0.6)
+    ax.legend(frameon=False)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _evaluate_algorithm(args, algo_name: str) -> dict:
     from test import test as evaluate_run
 
     run_dirs, skipped_dirs = _discover_run_dirs(
-        args.env_log_dir, args.algo, args.step
+        args.env_log_dir, algo_name, args.step, args.complete_only
     )
     for skipped_dir in skipped_dirs:
         print(f"> Skipping seed without a usable checkpoint: {skipped_dir}")
@@ -245,12 +287,111 @@ def main() -> None:
             f"got {pooled_reach_rates.shape}"
         )
 
-    print("> Aggregate over all evaluation episodes")
+    summary = {
+        "env": configs[0].env,
+        "label": _display_name(algo_name),
+        "episodes": expected_episodes,
+        "safety_mean": float(pooled_rates.mean()),
+        "safety_std": float(pooled_rates.std()),
+        "reach_mean": float(pooled_reach_rates.mean()),
+        "reach_std": float(pooled_reach_rates.std()),
+    }
+    print(f"> Aggregate over all evaluation episodes ({summary['label']})")
     print(f"  episodes={expected_episodes}")
-    print(f"  safety_rate_mean={pooled_rates.mean() * 100:.3f}%")
-    print(f"  safety_rate_std={pooled_rates.std() * 100:.3f}%")
-    print(f"  reach_rate_mean={pooled_reach_rates.mean() * 100:.3f}%")
-    print(f"  reach_rate_std={pooled_reach_rates.std() * 100:.3f}%")
+    print(f"  safety_rate_mean={summary['safety_mean'] * 100:.3f}%")
+    print(f"  safety_rate_std={summary['safety_std'] * 100:.3f}%")
+    print(f"  reach_rate_mean={summary['reach_mean'] * 100:.3f}%")
+    print(f"  reach_rate_std={summary['reach_std'] * 100:.3f}%")
+    return summary
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Discover every seed under an environment/algorithm log directory, "
+            "evaluate them on the same initial conditions, and report safety "
+            "and task reach rates."
+        )
+    )
+    parser.add_argument(
+        "--env-log-dir",
+        required=True,
+        help="environment log directory, for example logs/MPESpread",
+    )
+    parser.add_argument(
+        "--algo",
+        nargs="+",
+        required=True,
+        help="algorithm subdirectory names, for example dgppo deepqp",
+    )
+    parser.add_argument(
+        "--episodes",
+        type=int,
+        default=32,
+        help="evaluation initial conditions per trained seed (default: 32)",
+    )
+    parser.add_argument(
+        "--eval-seed",
+        type=int,
+        default=1234,
+        help="seed used to generate the shared evaluation initial conditions",
+    )
+    parser.add_argument(
+        "--step",
+        default=None,
+        help="checkpoint directory name for every run (default: latest)",
+    )
+    parser.add_argument("--max-step", type=int, default=None)
+    parser.add_argument("--stochastic", action="store_true", default=False)
+    parser.add_argument("--full-observation", action="store_true", default=False)
+    parser.add_argument("--cpu", action="store_true", default=False)
+    parser.add_argument(
+        "--complete-only",
+        action="store_true",
+        default=False,
+        help="evaluate only checkpoints whose iteration reached config.steps",
+    )
+    parser.add_argument(
+        "--plot-path",
+        default=None,
+        help=(
+            "comparison PNG path (default: "
+            "<env-log-dir>/safety_reach_comparison.png)"
+        ),
+    )
+    parser.add_argument(
+        "--reach-threshold",
+        type=float,
+        default=None,
+        help="goal-distance threshold (default: environment dist2goal)",
+    )
+    args = parser.parse_args()
+
+    if args.episodes <= 0:
+        parser.error("--episodes must be positive")
+    if args.episodes > 1_000:
+        parser.error("--episodes must not exceed 1000")
+    if args.reach_threshold is not None and args.reach_threshold <= 0.0:
+        parser.error("--reach-threshold must be positive")
+
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    if args.cpu:
+        os.environ["JAX_PLATFORM_NAME"] = "cpu"
+        os.environ["JAX_PLATFORMS"] = "cpu"
+
+    summaries = [_evaluate_algorithm(args, algo) for algo in args.algo]
+    env_names = {summary["env"] for summary in summaries}
+    if len(env_names) != 1:
+        raise ValueError("all algorithm directories must belong to the same environment")
+
+    plot_path = (
+        Path(args.plot_path).expanduser().resolve()
+        if args.plot_path is not None
+        else Path(args.env_log_dir).expanduser().resolve()
+        / "safety_reach_comparison.png"
+    )
+    _plot_summaries(summaries[0]["env"], summaries, plot_path)
+    print(f"> Plot saved to: {plot_path}")
 
 
 if __name__ == "__main__":
