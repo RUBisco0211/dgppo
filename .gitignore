@@ -6,3 +6,9 @@ logs
 *.egg-info
 outputs/*
 .papers
+/.cache/
+/artifacts/
+/fdpi/
+/gcbfplus/
+/multi-cbf/
+/gpudrive/
