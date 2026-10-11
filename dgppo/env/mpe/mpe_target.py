@@ -69,6 +69,8 @@ class MPETarget(MPE):
                                               jnp.array([i_agent]), jnp.array([i_agent + self.num_agents])))
 
         # agent - obs connection
+        if self._params["n_obs"] == 0:
+            return [agent_agent_edges] + agent_goal_edges
         obs_pos = state.obs[:, :2]
         poss_diff = agent_pos[:, None, :] - obs_pos[None, :, :]
         dist = jnp.linalg.norm(poss_diff, axis=-1)

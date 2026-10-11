@@ -83,7 +83,7 @@ def _rollout_metrics(rollout: Rollout, prefix: str, cost_components):
 
 def _training_metrics(update_info: dict):
     aliases = {
-        "train/agents/loss_objective": ("policy/loss",),
+        "train/agents/loss_objective": ("policy/ppo_loss", "policy/loss"),
         "train/agents/loss_critic": ("Vl/loss",),
         "train/agents/loss_critic_l": ("Vl/loss",),
         "train/agents/loss_critic_h": ("Vh/loss_Vh", "Vh/loss"),
@@ -177,6 +177,9 @@ class Trainer:
         self.eval_interval = params['eval_interval']
         self.eval_epi = params['eval_epi']
         self.save_interval = params['save_interval']
+        self.diagnostic_snapshot_interval = params.get(
+            'diagnostic_snapshot_interval', 0
+        )
         self.video_interval = params.get('video_interval', self.eval_interval)
         self.log_video = params.get('log_video', True)
         self.video_dpi = params.get('video_dpi', 100)
@@ -219,6 +222,9 @@ class Trainer:
         assert params['eval_epi'] >= 1, 'eval_epi must be greater than or equal to 1'
         assert 'save_interval' in params, 'save_interval not found in params'
         assert params['save_interval'] > 0, 'save_interval must be positive'
+        assert params.get('diagnostic_snapshot_interval', 0) >= 0, (
+            'diagnostic_snapshot_interval must be non-negative'
+        )
         assert params.get('start_step', 0) >= 0, 'start_step must be non-negative'
         return True
 
@@ -228,7 +234,7 @@ class Trainer:
             shutil.rmtree(latest_dir)
         for name in os.listdir(self.model_dir):
             path = os.path.join(self.model_dir, name)
-            if path == latest_dir:
+            if path == latest_dir or name == 'diagnostic':
                 continue
             if os.path.isdir(path):
                 shutil.rmtree(path)
@@ -245,6 +251,14 @@ class Trainer:
         with open(os.path.join(latest_dir, 'trainer_state.pkl'), 'wb') as file:
             pickle.dump(training_state, file)
         pathlib.Path(latest_dir, f"latest_iter_{int(step):09d}.txt").touch()
+
+    def _save_diagnostic_snapshot(self, step: int):
+        """Preserve parameters for read-only post-training diagnostics."""
+        if self.diagnostic_snapshot_interval <= 0:
+            return
+        snapshot_root = os.path.join(self.model_dir, 'diagnostic')
+        pathlib.Path(snapshot_root).mkdir(parents=True, exist_ok=True)
+        self.algo.save(snapshot_root, f'step_{int(step):09d}')
 
     def _eval_video(self, rollouts: Rollout, step: int):
         if not self.save_log or not self.log_video or step % self.video_interval != 0:
@@ -286,7 +300,12 @@ class Trainer:
                 )
 
         test_fn = lambda params, keys: jax.vmap(ft.partial(test_fn_single, params))(keys)
-        test_fn = jax.jit(test_fn)
+        if hasattr(self.algo, "eval_rollouts_host"):
+            # CPU LP/QP filters expose an explicit host collector. Ordinary
+            # algorithms retain the existing vmap+jit evaluation path.
+            test_fn = ft.partial(self.algo.eval_rollouts_host, self.env_test)
+        else:
+            test_fn = jax.jit(test_fn)
 
         # start training
         test_key = jr.PRNGKey(self.seed)
@@ -356,6 +375,17 @@ class Trainer:
                     checkpoint_start = time()
                     self._save_latest_checkpoint(step)
                     log_info["time/checkpoint_sec"] = time() - checkpoint_start
+
+                if (
+                    self.save_log
+                    and self.diagnostic_snapshot_interval > 0
+                    and step % self.diagnostic_snapshot_interval == 0
+                ):
+                    snapshot_start = time()
+                    self._save_diagnostic_snapshot(step)
+                    log_info["time/diagnostic_snapshot_sec"] = (
+                        time() - snapshot_start
+                    )
 
                 # collect rollouts
                 collection_start = time()

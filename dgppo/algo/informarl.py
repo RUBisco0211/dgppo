@@ -432,10 +432,19 @@ class InforMARL(Algorithm):
             loss_policy = jnp.maximum(loss_policy1, loss_policy2).mean()
             total_entropy = bcTa_policy_entropy.mean()
             policy_loss = loss_policy - self.coef_ent * total_entropy
+            auxiliary_info = {}
+            if hasattr(self, "actor_auxiliary_loss"):
+                # Expose the unmodified PPO objective for comparisons with
+                # algorithms that do not add an actor auxiliary loss.
+                auxiliary_loss, auxiliary_info = self.actor_auxiliary_loss(
+                    params, rollout, rnn_chunk_ids, bcT_graph, bcT_rnn_states
+                )
+                auxiliary_info["policy/ppo_loss"] = policy_loss
+                policy_loss = policy_loss + auxiliary_loss
             total_variation_dist = 0.5 * jnp.mean(jnp.abs(bcTa_ratio - 1.0))
             return policy_loss, {'policy/clip_frac': clip_frac,
                                  'policy/entropy': bcTa_policy_entropy.mean(),
-                                 'policy/total_variation_dist': total_variation_dist}
+                                 'policy/total_variation_dist': total_variation_dist} | auxiliary_info
 
         (loss, info), grad = jax.value_and_grad(get_loss_, has_aux=True)(policy_train_state.params)
         policy_has_nan = has_any_nan_or_inf(grad).astype(jnp.float32)

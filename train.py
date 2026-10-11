@@ -142,6 +142,14 @@ def _train_rl(args):
         manifold_slack_beta=args.manifold_slack_beta,
         manifold_slack_weight=args.manifold_slack_weight,
         manifold_reg=args.manifold_reg,
+        pairwise_cbf_mode=getattr(args, "pairwise_cbf_mode", "certificate"),
+        pairwise_cbf_alpha1=getattr(args, "pairwise_cbf_alpha1", 3.0),
+        pairwise_cbf_alpha2=getattr(args, "pairwise_cbf_alpha2", 3.0),
+        pairwise_cbf_safety_margin=getattr(args, "pairwise_cbf_safety_margin", 0.0),
+        pairwise_cbf_sensing_radius=getattr(args, "pairwise_cbf_sensing_radius", None),
+        pairwise_cbf_slack_penalty=getattr(args, "pairwise_cbf_slack_penalty", 1e6),
+        pairwise_cbf_witness_fallback=getattr(args, "pairwise_cbf_witness_fallback", False),
+        cbf_action_loss_coef=getattr(args, "cbf_action_loss_coef", 1.0),
         deep_qp_checkpoint=args.deep_qp_checkpoint,
         deep_qp_gnn_layers=args.deep_qp_gnn_layers,
         deep_qp_gnn_out_dim=args.deep_qp_gnn_out_dim,
@@ -251,6 +259,7 @@ def _train_rl(args):
         "eval_interval": args.eval_interval,
         "eval_epi": args.eval_epi,
         "save_interval": args.save_interval,
+        "diagnostic_snapshot_interval": args.diagnostic_snapshot_interval,
         "video_interval": args.eval_interval,
         "log_video": not args.no_video and not args.debug,
         "video_dpi": args.video_dpi,
@@ -434,6 +443,17 @@ def main():
     parser.add_argument("--manifold-slack-weight", type=float, default=10.0)
     parser.add_argument("--manifold-reg", type=float, default=1e-5)
 
+    # CPU MPE pair-wise CBF / multi-cbf responsibility allocation
+    parser.add_argument("--pairwise-cbf-mode", choices=("uniform", "capability", "certificate", "centralized", "qp"),
+                        default="certificate")
+    parser.add_argument("--pairwise-cbf-alpha1", type=float, default=3.0)
+    parser.add_argument("--pairwise-cbf-alpha2", type=float, default=3.0)
+    parser.add_argument("--pairwise-cbf-safety-margin", type=float, default=0.0)
+    parser.add_argument("--pairwise-cbf-sensing-radius", type=float, default=None)
+    parser.add_argument("--pairwise-cbf-slack-penalty", type=float, default=1e6)
+    parser.add_argument("--pairwise-cbf-witness-fallback", action="store_true", default=False)
+    parser.add_argument("--cbf-action-loss-coef", type=float, default=1.0)
+
     # pretrained Graph-HJ critic and Deep-QP policy-training arguments
     parser.add_argument("--deep-qp-checkpoint", type=str, default=None)
     parser.add_argument("--deep-qp-gnn-layers", type=int, default=1)
@@ -524,6 +544,15 @@ def main():
     parser.add_argument("--eval-interval", type=int, default=1000)
     parser.add_argument("--eval-epi", type=int, default=1)
     parser.add_argument("--save-interval", type=int, default=1000)
+    parser.add_argument(
+        "--diagnostic-snapshot-interval",
+        type=int,
+        default=0,
+        help=(
+            "preserve parameter-only checkpoints for post-training diagnostics; "
+            "0 disables diagnostic snapshots without changing normal training"
+        ),
+    )
     parser.add_argument("--no-video", action="store_true", default=False)
     parser.add_argument("--video-dpi", type=int, default=100)
     parser.add_argument(
