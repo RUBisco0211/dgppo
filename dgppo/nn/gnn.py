@@ -129,9 +129,29 @@ class GraphTransformerGNN(nn.Module):
     out_dim: int
     n_heads: int
     n_layers: int
+    base_node_dim: int = 0
+    road_slots: int = 0
+    road_feature_dim: int = 0
+    road_embed_dim: int = 16
 
     @nn.compact
     def __call__(self, graph: GraphsTuple, node_type: int = None, n_type: int = None) -> Array:
+        if self.road_slots:
+            base = graph.nodes[..., :self.base_node_dim]
+            road = graph.nodes[..., self.base_node_dim:].reshape(
+                graph.nodes.shape[:-1] + (self.road_slots, self.road_feature_dim))
+            valid = road[..., -1:] > 0
+            encoded = nn.relu(nn.Dense(self.road_embed_dim, name="RoadSegmentEncoder")(road[..., :-1]))
+            count = jnp.maximum(valid.sum(axis=-2), 1)
+            mean_pool = jnp.where(valid, encoded, 0.0).sum(axis=-2) / count
+            # Using -inf for an all-padding road set gives a finite forward
+            # result after where(), but its max-pool gradient is NaN.  A finite
+            # sentinel plus an explicit has-valid mask keeps padding nodes
+            # differentiable with exactly zero features and gradients.
+            has_valid = jnp.any(valid, axis=-2)
+            max_pool = jnp.max(jnp.where(valid, encoded, -1e9), axis=-2)
+            max_pool = jnp.where(has_valid, max_pool, 0.0)
+            graph = graph._replace(nodes=jnp.concatenate([base, mean_pool, max_pool], axis=-1))
         for i in range(self.n_layers):
             out_dim = self.out_dim if i == self.n_layers - 1 else self.msg_dim
             gnn_layer = GraphTransformer(self.n_heads, out_dim, act=nn.relu)

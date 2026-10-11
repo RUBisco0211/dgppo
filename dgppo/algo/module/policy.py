@@ -142,6 +142,9 @@ class PPOPolicy(MultiAgentPolicy):
             gnn_layers: int = 1,
             gnn_out_dim: int = 16,
             use_lstm: bool = False,
+            base_node_dim: int = 0,
+            road_slots: int = 0,
+            road_feature_dim: int = 0,
     ):
         super().__init__(node_dim, edge_dim, n_agents, action_dim)
         self.gnn_out_dim = gnn_out_dim
@@ -151,7 +154,9 @@ class PPOPolicy(MultiAgentPolicy):
             msg_dim=32,
             out_dim=gnn_out_dim,
             n_heads=3,
-            n_layers=gnn_layers
+            n_layers=gnn_layers,
+            base_node_dim=base_node_dim, road_slots=road_slots,
+            road_feature_dim=road_feature_dim
         )
         self.head = ft.partial(
             MLP,

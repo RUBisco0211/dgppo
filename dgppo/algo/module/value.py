@@ -27,8 +27,12 @@ class RStateFn(nn.Module):
         """
         x = self.gnn_cls()(graph, node_type=0, n_type=n_agents)
 
-        # aggregate information using mean
-        x = x.mean(axis=0, keepdims=True)  # (1, msg_dim)
+        # Aggregate only real agent nodes. Fixed-shape GPUDrive batches pad
+        # variable-size scenes with zero agent slots (node_type == -1).
+        valid = (jnp.arange(n_agents) < jnp.sum(graph.node_type == 0)).astype(x.dtype)
+        x = (x * valid[:, None]).sum(axis=0, keepdims=True) / jnp.maximum(
+            valid.sum(), 1.0
+        )
 
         # pass through head class
         x = self.head_cls()(x)  # (1, msg_dim)
@@ -94,7 +98,9 @@ class ValueNet:
             use_lstm: bool = False,
             decompose: bool = False,
             use_global_info: bool = False,
-            n_heads: int = 3
+            n_heads: int = 3,
+            base_node_dim: int = 0, road_slots: int = 0,
+            road_feature_dim: int = 0
     ):
         self.node_dim = node_dim
         self.edge_dim = edge_dim
@@ -109,7 +115,9 @@ class ValueNet:
             msg_dim=32,
             out_dim=gnn_out_dim,
             n_heads=n_heads,
-            n_layers=gnn_layers
+            n_layers=gnn_layers,
+            base_node_dim=base_node_dim, road_slots=road_slots,
+            road_feature_dim=road_feature_dim
         )
         self.head = ft.partial(
             MLP,

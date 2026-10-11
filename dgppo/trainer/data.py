@@ -43,6 +43,25 @@ class SafetyBatch(NamedTuple):
     dones: Done
 
 
+class CBFRollout(NamedTuple):
+    """PPO nominal samples plus detached CBF execution targets.
+
+    actions/log_pis describe the policy sample, while executed_actions
+    generated rewards/next_graph and supervise the actor on interventions.
+    """
+
+    graph: GraphsTuple
+    actions: Action
+    rnn_states: Array
+    rewards: Reward
+    costs: Cost
+    dones: Done
+    log_pis: Array
+    next_graph: GraphsTuple
+    executed_actions: Action
+    intervention_mask: Array
+
+
 class GCBFTransitionBatch(NamedTuple):
     """Transitions and horizon labels consumed by GCBF+ updates."""
 

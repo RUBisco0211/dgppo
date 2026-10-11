@@ -1,0 +1,9 @@
+# CUDA 12.4 compatibility lock for the joint GPUDrive + DGPPO environment.
+torch==2.6.0+cu124
+jax==0.5.3
+jaxlib==0.5.3
+jax-cuda12-plugin==0.5.3
+jax-cuda12-pjrt==0.5.3
+flax==0.10.4
+orbax-checkpoint==0.11.13
+numpy==1.26.4
