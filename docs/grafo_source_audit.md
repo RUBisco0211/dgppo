@@ -1,174 +1,64 @@
-# GRAFO source audit (arXiv:2610.10302v1)
+# GRAFO 源码与论文对照审计（arXiv:2610.10302v1）
 
-Update after the single-task discrepancy audit: the physics now advances
-position with the old velocity, then applies damping and force; reaching
-agents are snapped to their targets and frozen. Policy node coordinates are
-relative to the visible landmark, and the actor concatenates local node
-features with a four-round UniMP representation after two input feature
-layers. These changes were checked by environment tests and a one-update PPO
-smoke run. The table below preserves the initial discrepancies for provenance;
-the action encoding, numerical reach threshold, bonus scale, and exact GRAFO
-observation graph remain unverified because the authors' environment code is
-unavailable. An optional five-action discrete policy/environment path was
-added after the failed full-sequence runs; it follows the cited JaxInforMARL
-Formation default, while the original continuous path remains available for
-controlled comparisons. The Figure 9 graph edges and offsets were visually checked
-against `media/drawio/GRAFO_tasks.drawio.pdf` in the arXiv source package.
+单任务差异排查后，当前物理积分先用旧速度更新位置，再计算阻尼和动作力；到达目标的智能体会被吸附并固定。策略节点坐标相对于可见地标表示；actor 将局部节点特征与经过两层输入特征变换、四轮消息传递的 UniMP 表征拼接。环境测试及一次 PPO update 冒烟运行覆盖了这些修改。下表保留**修改前的差异**以便追溯，不能把表中的旧行为误认为当前实现。由于作者的 GRAFO 环境源码不可用，动作编码、数值到达阈值、奖励尺度和精确观测图仍未核实。早期完整序列失败后，我们又加入可选的五动作离散策略与环境路径；它参考论文引用的 JaxInforMARL Formation 默认设置，原有连续动作路径保留用于受控比较。图 9 的边和目标偏移量已对照 arXiv 源码包中的 `media/drawio/GRAFO_tasks.drawio.pdf` 目视核查。
 
-Primary sources: [paper and appendix](https://arxiv.org/html/2610.10302v1), [cited JaxInforMARL repository](https://github.com/jselvaraaj/JaxInforMARL/tree/6659678355668a90e3afb41e3bf51b553a4ea2b9), and [original InforMARL Formation scenario](https://github.com/nsidn98/InforMARL/blob/7d3c42a66006991ec2c3462e065f0449317d5470/baselines/mpnn/mpe/mape/multiagent/scenarios/simple_formation.py). The paper authors' GRAFO implementation was not available in these sources. Accordingly, matching a cited repository's defaults does **not** establish that the authors' GRAFO experiments used those defaults.
+一手来源：[论文及附录](https://arxiv.org/html/2610.10302v1)、[论文引用的 JaxInforMARL 仓库](https://github.com/jselvaraaj/JaxInforMARL/tree/6659678355668a90e3afb41e3bf51b553a4ea2b9)、[原始 InforMARL Formation 场景](https://github.com/nsidn98/InforMARL/blob/7d3c42a66006991ec2c3462e065f0449317d5470/baselines/mpnn/mpe/mape/multiagent/scenarios/simple_formation.py)。这些来源中没有作者的 GRAFO 实现。因此，**对齐被引用仓库的默认值，并不能证明作者的 GRAFO 实验也使用这些默认值**。
 
-## Confirmed matches
+## 已确认的一致处
 
-- The paper's Appendix, “Single-Task Description,” defines a task by adjacency `A`, target shifts `g`, an optional structurally equivalent node set, and optional static features. The implementation has those fields and only exposes one reference landmark; target shifts are used for reward and evaluation, not direct policy input. This matches the paper's qualitative description.
-- The five sequence definitions in `dgppo/env/mpe/grafo.py` match Appendix “GRAFO Tasks” TS, TS-inc, TS-dec, CS, and GFS task names and order.
-- Figure 9 target shifts for GRAFO-3 and GRAFO-4(1–4) match the current catalog. The other tasks' shifts appear consistent with extracted figure labels, though graph topology should be checked visually from the PDF rather than inferred from extracted text.
-- The paper's hyperparameter table says episode length 50 and collisions disabled; the current environment uses 50 and returns zero collision cost. It also specifies 128-step rollout, 32 parallel environments, and 64 evaluation episodes.
+- 论文附录“单任务描述”用邻接矩阵 `A`、目标偏移量 `g`、可选的结构等价节点集合和可选静态特征定义任务。当前实现包含这些字段，策略只看到一个参考地标；目标偏移量用于奖励和评估，不直接作为策略输入。这与论文的定性描述一致。
+- `dgppo/env/mpe/grafo.py` 中的五种序列 TS、TS-inc、TS-dec、CS、GFS，其任务名称与顺序均对应附录的“GRAFO Tasks”。
+- GRAFO-3 和 GRAFO-4(1–4) 的图 9 目标偏移量与当前任务目录一致。其余任务的偏移量与图中提取的标注看起来一致；图拓扑应以 PDF 目视核查为准，不应仅从提取出的文字推断。
+- 论文超参数表指定 episode 长度为 50、关闭碰撞；当前环境使用 50 步并返回零碰撞 cost。表中还指定 128 步 rollout、32 个并行环境和 64 个评估 episode。
 
-## Concrete differences or unsupported assumptions
+## 早期实现的具体差异与仍未证实的假设
 
-| Area | Current repository | Primary-source evidence | Consequence |
+下表的“当时实现”列记录排查开始时的状态；物理更新、到达后固定及相对坐标等项目已按上文修正。论文未明确的项目仍应视为假设。
+
+| 方面 | 当时实现 | 一手来源中的证据 | 对结果的影响 |
 | --- | --- | --- | --- |
-| Action space | Continuous two-axis `TanhNormal` policy and force | The cited JaxInforMARL `TargetMPEEnvironment` defaults to `DISCRETE_ACT`; `_discrete_action_to_control_input` maps five actions (stay/left/right/down/up) to axis forces. Its continuous handler is unimplemented (`pass`). Paper says GRAFO action space equals Formation, but does not state the action encoding. | Major fidelity gap; training difficulty and reachable trajectories differ. Do not claim proof that paper used discrete actions, but investigate this first. |
-| Physics step | `velocity = 0.75*v + 5*a*0.1; position += velocity*0.1` | Cited JaxInforMARL `_integrate_state` first updates `position += old_velocity*dt`, then damps velocity and adds force. | One-step movement and 50-step control problem differ, even if force scale and damping match. |
-| Reaching behavior | Agent can move after reaching; reward bonus uses first reach; evaluation tests whether all simultaneously enter radius. | Cited JaxInforMARL `_step` masks control of an agent already overlapping its landmark and snaps newly reached agents to goal. The paper itself only specifies a one-time bonus and team reaching targets, not snapping or terminal rules. | Potentially explains low final-step success; status is source ambiguity rather than a proven paper mismatch. |
-| Reward scale | `-mean(Euclidean distances) + mean(newly reached)` with assumed bonus 1. | Appendix says *each agent's* reward is negative distance to assigned target plus one-time bonus. It does not specify coefficient, shared-reward aggregation, bonus size, clipping, or Euclidean vs squared. Cited JaxInforMARL uses global **sum of squared distances** with coefficient 1 and bonus 5 (in its training config); original InforMARL Formation uses a clipped mean Euclidean-distance penalty. | Current reward scale and objective remain unverified. Avoid choosing a reward merely because it is in a related environment. |
-| Initialization | Agents uniform in `[-1,1]^2`, one landmark uniform in `[-0.5,0.5]^2`; no minimum separation. | Original InforMARL Formation uses those ranges. Cited JaxInforMARL training config uses radius 1 and rejects landmark pairs closer than 0.5, but has one landmark here. Paper says random initial positions only. | Ranges are plausible, but GRAFO distribution cannot be established from paper. |
-| Graph observations | Base `MPE.get_graph` exposes absolute position and velocity of each agent and landmark as node features and relative state on task edges. All agents have reference landmark edges; no self edges among agents. | Paper says all agents access the reference position and graph topology; Appendix says observation/action spaces match Formation. Cited JaxInforMARL constructs **per-agent relative** node features and distance-based visibility edges, typically with self edges. The authors necessarily altered its graph structure for GRAFO, but no exact code is published. | Current topology/feature interface is a design interpretation, not exact sourced implementation. Absolute coordinates differ from original InforMARL Formation's local observation of own velocity, own position, and relative landmark. |
-| Goal tolerance | `dist2goal = 0.05` | Original InforMARL Formation uses 0.05. Paper gives no numeric tolerance; cited JaxInforMARL uses overlap of radii 0.15 + 0.2 = 0.35. | A strict 0.05 simultaneous success criterion may dramatically depress measured success. Cannot equate it to paper metric without author code. |
+| 动作空间 | 二维连续 `TanhNormal` 策略及作用力。 | 论文引用的 JaxInforMARL `TargetMPEEnvironment` 默认使用 `DISCRETE_ACT`；`_discrete_action_to_control_input` 将停、左、右、下、上五个动作映射到坐标轴作用力，连续动作处理仍为 `pass`。论文称 GRAFO 动作空间与 Formation 相同，但没有写明动作编码。 | 属于重要的复现不确定性，会改变训练难度和可达轨迹。不能据此断言论文用了离散动作，但应优先排查。 |
+| 物理积分 | 先算 `velocity = 0.75*v + 5*a*0.1`，再用新速度更新位置。 | 被引用仓库的 `_integrate_state` 先执行 `position += old_velocity*dt`，再更新速度。 | 即使作用力与阻尼相同，一步位移和 50 步控制问题也会不同；**当前实现已改为旧速度积分**。 |
+| 到达后的行为 | 智能体到达后仍可移动；首次到达给 bonus；评估检查所有智能体是否同时进入阈值。 | JaxInforMARL 的 `_step` 屏蔽已与地标重叠的智能体控制，并将新到达的智能体吸附到目标。论文本身只写一次性 bonus 和团队到达目标，没有说明吸附或终止规则。 | 可能使最后一步成功率偏低；**当前实现已加入吸附与固定**，但仍不能证明论文采用此规则。 |
+| 奖励尺度 | `-mean(欧氏距离) + mean(新到达奖励)`，假定 bonus 为 1。 | 附录称每个智能体获得到分配目标的负距离和一次性 bonus，但未给出系数、共享奖励聚合方式、bonus 大小、裁剪方式，以及距离是否平方。JaxInforMARL 使用**平方距离全局求和**和 bonus 5（见训练配置）；原始 InforMARL Formation 使用裁剪后的平均欧氏距离惩罚。 | 当前奖励尺度和目标函数仍未经证实，不能仅因为相关环境使用某种奖励就直接采用。 |
+| 初始化 | 智能体均匀采样于 `[-1,1]^2`，地标均匀采样于 `[-0.5,0.5]^2`，不限制最小间距。 | 原始 InforMARL Formation 使用这些范围。JaxInforMARL 训练配置使用半径 1，且拒绝间距小于 0.5 的地标对；当前任务只有一个地标。论文只写随机初始位置。 | 这些范围有来源，但无法由论文确定 GRAFO 的真实初始分布。 |
+| 图观测 | 当时的 `MPE.get_graph` 在节点特征中暴露智能体和地标的绝对位置、速度；任务边使用相对状态；所有智能体连接参考地标，智能体之间没有自环。 | 论文称所有智能体都能看到参考位置和图拓扑，附录称观测与动作空间沿用 Formation。JaxInforMARL 通常构造**每个智能体的相对**节点特征、基于距离的可见边和自环。作者为 GRAFO 必然修改了图结构，但未公开具体代码。 | 当前拓扑与特征接口是实现选择，不是已核实的原版；**当前策略节点坐标已改为相对地标**，精确图定义仍未知。 |
+| 目标容差 | `dist2goal = 0.05`。 | 原始 InforMARL Formation 使用 0.05。论文没有给出数值；JaxInforMARL 的到达条件是半径 0.15 与 0.20 的实体发生重叠，相当于 0.35。 | 严格的 0.05 阈值可能显著压低成功率。未获得作者源码前，不应认为它与论文的成功判定相同。 |
 
-## Recommended resolution order
+## 建议的核对顺序
 
-1. Verify the catalog's edges visually against Figure 9 (PDF source is under `media/drawio/GRAFO_tasks.drawio.pdf` in the arXiv source package). Add source-coordinate fixtures/tests for graph and shifts.
-2. Decide whether the training baseline should follow the cited JaxInforMARL discrete actions and dynamics, or the original InforMARL Formation MPE. Report this explicit branch choice: the paper alone does not settle it.
-3. Run small controlled ablations of goal threshold, bonus scale, and reward aggregation with identical seeds. Label them as sensitivity analyses until the authors publish their environment code.
-4. Avoid comparing the current 42.19% success to the paper's single-task result as if success definitions were identical. The paper's `R_{i,j}` is percentage of solved episodes, but exact radius/snap rules are absent.
+1. 对照图 9 的 PDF 核查任务目录中的边与偏移量；可将源图坐标加入测试样例。
+2. 明确训练基线采用论文所引用的 JaxInforMARL 离散动作与动力学，还是原始 InforMARL Formation MPE，并在报告中标记这个选择。单靠论文无法确定。
+3. 在相同种子下分别测试目标阈值、bonus 大小和奖励聚合方式。作者公布源码前，应将它们标为敏感性分析。
+4. 不能把早期 42.19% 成功率与论文单任务结果直接作同口径比较。论文的 `R_{i,j}` 是 episode 解决比例，但精确半径和吸附规则缺失。
 
-## 2026-10-12 failed-run investigation
+## 2026-10-12：早期失败实验的排查
 
-- Full seed-0 batch-512 FROG+EWC(M) runs failed to learn several new tasks.
-  FT forgot earlier tasks, but this alone does not explain the failures.
-- A 64-episode evaluation of the CS stage-1 GRAFO-6(1) checkpoint found
-  that the last two agents reached their targets in only about 22% and 17%
-  of episodes, respectively. Their median closest distances were about 0.83
-  and 0.87. The zero team success is therefore not merely a strict 0.05
-  threshold artifact.
-- A target-aware proportional controller solved all 64 sampled episodes on
-  GRAFO-5, GRAFO-6(1), GRAFO-7, GRAFO-4(2), and GRAFO-4(3) in 50 steps.
-  The implemented dynamics can reach those formations.
-- The continuous-action GRAFO-6(1) single-task run reached 0/64 success
-  after 1,003,520 frames. Removing the extra actor `ScaleHid` layer and
-  limiting each task head to the final distribution layer also yielded 0/64
-  after the same budget. Those fixes align the action module with the paper's
-  two-hidden-layer specification but are not yet an empirical learning fix.
-- The cited JaxInforMARL Formation code defaults to five discrete actions
-  (stay, left, right, down, up); its continuous-action converter is empty.
-  The paper does not say whether its GRAFO fork retained that default.
-  `--action-encoding discrete` implements this as a controlled fidelity
-  check. The same cited Formation code uses overlap of 0.15 and 0.20 entity
-  radii; `--reach-threshold 0.35` is the corresponding controlled setting,
-  not a verified GRAFO parameter.
-- With five discrete actions, a target-aware controller solved 0/64 sampled
-  GRAFO-6(1) episodes at radius 0.05 but 64/64 at radii 0.15, 0.25, and
-  0.35. The discrete-action radius-0.35 five-million-frame single-task
-  validation is in progress in tmux session `d6`; its 200-update evaluation
-  reached 6/64 team successes, whereas both continuous-action 245-update
-  diagnostic runs had 0/64. This comparison changes the action distribution
-  and reach threshold together, so it does not isolate either choice.
-- Re-evaluating the discrete-action 300-update checkpoint with the same 64
-  episode keys at thresholds 0.05, 0.15, 0.25, and 0.35 yielded 0%, 1.56%,
-  4.69%, and 64.06% team success. Early performance is highly sensitive to
-  this undocumented GRAFO threshold. Do not equate the radius-0.35 result
-  with the paper's solved percentage until the authors' criterion is known.
-- The five-million-frame GRAFO-6(1) single-task run completed 1221 PPO
-  updates and reached 60/64 (93.75%) successes at radius 0.35. At the final
-  checkpoint, a fixed 64-episode sensitivity evaluation yielded 0%, 4.69%,
-  48.44%, and 89.06% success at radii 0.05, 0.15, 0.25, and 0.35.
-  Consequently, the source-informed configuration is learnable, but the
-  paper's reported 99.4% single-task median cannot yet be compared directly.
-- A separate GRAFO-4(2) run with five discrete actions and radius 0.35
-  reached 64/64 successes after 245 PPO updates (1,003,520 frames). This
-  establishes that the previously failed GFS task is individually learnable
-  under the source-informed setting; it does not establish that FROG will
-  learn it after another task. A continuous-action radius-0.35 GRAFO-6(1)
-  ablation is in progress to separate the action and threshold effects.
-  Fixed-key evaluation of the final GRAFO-4(2) policy at radii 0.05, 0.15,
-  0.25, and 0.35 gave 0%, 15.63%, 85.94%, and 100% success, respectively.
-- The controlled continuous-action radius-0.35 GRAFO-6(1) run reached 61/64
-  (95.31%) team successes after 245 updates (1,003,520 frames); it had
-  already reached 64/64 at update 200. With the same two-hidden-layer actor,
-  continuous actions at radius 0.05 had 0/64 at update 245. Thus, the
-  threshold is a major driver of the original single-task failure. This is
-  still an inference about our implementation, not proof of the authors'
-  unknown GRAFO radius.
-- A two-task GFS prefix, GRAFO-4(1) then GRAFO-4(2), is being trained with
-  continuous actions, radius 0.35, FROG+EWC(M), and one million frames per
-  task. It finished with 100% success on GRAFO-4(1) and 0% on GRAFO-4(2),
-  so the larger radius alone does not fix new-task learning after switching.
-  The reported two-task AFP/AP are both 0.5, with AF 0 only because the
-  second task was never learned. A continuous-action, radius-0.35
-  GRAFO-4(2) single-task run reached 62/64 (96.88%) after the same one
-  million frames, confirming that the failure is specific to the sequential
-  setup. The matching FT run finished with 13/64 (20.31%) on the old task
-  and 62/64 (96.88%) on the new one: it learned the new task while forgetting
-  much of the old one. This points to FROG freezing and/or EWC as the source
-  of plasticity loss. A FROG-without-EWC run with the isolated minibatch RNG
-  finished at 64/64 on the first task and 62/64 (96.88%) on the second task,
-  with AP=AFP=98.44% and AF=0. This shows the frozen encoder and separate
-  output heads can learn this sequence without EWC. The matched FROG+EWC(M)
-  run with isolated RNG retained 64/64 on the old task but learned 0/64 on
-  the new task. Its final EWC penalty was about 0.0094, while the final PPO
-  loss was about -0.0017. These scalar losses do not alone prove a gradient
-  imbalance, but the paired outcome identifies EWC as the cause of failed
-  new-task learning in this implementation and budget. A coefficient-100
-  continuation from the exact stage-1 checkpoint also finished at 0/64
-  new-task success while preserving 64/64 old-task success. This is a
-  hyperparameter sensitivity result; it does not establish an error in the
-  diagonal-Fisher formula. With coefficient 1, the new task reached 64/64,
-  but the old task declined to 57/64 (89.06%). Thus coefficient tuning can
-  restore plasticity in this two-task run, but it did not outperform FROG
-  alone (old 64/64, new 62/64). The paper's coefficient is retained as the
-  default and these lower values remain explicitly labeled ablations.
-- The 0.05-threshold, continuous-action GRAFO-6(1) single-task checkpoint
-  after 1,003,520 frames was reevaluated on 64 episodes. It solved 0/64;
-  the median *best-over-time team maximum* target distance was 0.784 and
-  even its closest team state was never within 0.35. Thus the failure is
-  more than missing a strict final 0.05 precision window. The first four
-  agents sometimes approached their goals, whereas the last two had mean
-  individual closest distances about 0.234 and 0.241. This is a one-seed,
-  short-budget diagnosis, not a five-million-frame verdict. The continuation
-  reached 5,001,216 total frames and 1221 PPO updates at radius 0.05. Its
-  final training-loop evaluation solved 4/64 (6.25%) episodes. An independent
-  fixed-key evaluation of the final checkpoint solved 2/64 (3.125%); 42/64
-  trajectories came within 0.35 at some point, but only 14/64 within 0.15.
-  The median closest-over-time team maximum distance was 0.258. This remains
-  far from the paper's reported single-task result under our stricter,
-  unverified success criterion. Because the original checkpoint predated
-  the isolated minibatch RNG change, this continuation used a new dedicated
-  shuffle stream and is not an exact uninterrupted same-seed run. A manual
-  resume-state migration initially retained the completed-stage evaluation
-  matrix and caused an IndexError at the final update; the matrix was reset
-  in the cloned update-1200 checkpoint and the final 21 updates completed.
-- Prior CGMARL runs used the process-global NumPy RNG to shuffle PPO
-  minibatches. Despite equal first rollouts, W&B initialization could cause
-  first-update minibatch order to differ between runs. New runs keep a
-  dedicated NumPy shuffle RNG in the checkpoint and no longer use the global
-  RNG for PPO minibatches. Earlier FT/FROG+EWC runs are qualitative controls;
-  exact paired comparisons must be rerun with the isolated RNG version.
-- The user-requested batch size 512 differs from the paper's 32 minibatches
-  per 4096-step update (batch size 128). With four PPO epochs, this changes
-  the actor/critic optimizer steps from 128 to 32 per update. The EWC
-  coefficient listed in the paper was tuned under that different update
-  schedule, so the coefficient ablations above cannot be read as evidence
-  that the paper's hyperparameter is intrinsically wrong.
+- 早期 seed 0、batch 512 的 FROG+EWC(M) 完整序列在若干新任务上学不会。FT 对旧任务有遗忘，但这不足以解释 FROG+EWC(M) 的新任务失败。
+- 对 CS 第一阶段 GRAFO-6(1) 检查点评估 64 个 episode：最后两个智能体分别仅在约 22% 和 17% 的 episode 中到达目标；其最近距离的中位数约为 0.83 和 0.87。因此团队成功率为零不只是 0.05 严格阈值造成的统计假象。
+- 能看到目标的比例控制器，在 GRAFO-5、GRAFO-6(1)、GRAFO-7、GRAFO-4(2)、GRAFO-4(3) 各采样的 64 个 episode 中均可于 50 步内完成编队，说明当前动力学允许到达这些配置。
+- 连续动作的 GRAFO-6(1) 单任务训练 1,003,520 帧后成功率为 0/64。去掉额外的 actor `ScaleHid` 层，并将任务输出头限定为最终分布层后，同样预算仍为 0/64。这些修改使动作模块更接近论文的两层隐藏层设置，但当时尚未解决学习失败。
+- JaxInforMARL Formation 默认有停、左、右、下、上五个离散动作，连续动作转换器为空；论文没有说明其 GRAFO 分支是否保留该默认值。`--action-encoding discrete` 用于受控核对。该 Formation 代码还按半径 0.15 与 0.20 的实体重叠判定到达；`--reach-threshold 0.35` 是相应的受控设置，**并非已证实的 GRAFO 参数**。
+- 使用五个离散动作的目标比例控制器，在 0.05 半径下解决 0/64 个 GRAFO-6(1) episode，而在 0.15、0.25、0.35 半径下均解决 64/64。离散动作、0.35 半径的 500 万帧单任务验证当时在 tmux `d6` 中运行；第 200 次 update 的团队成功为 6/64，而两条连续动作、运行 245 次 update 的早期诊断均为 0/64。这组对比**同时**改变动作分布与到达阈值，不能拆分两者的作用。该运行的最终结果见下文。
+- 在相同的 64 个评估随机 key 下，离散动作第 300 次 update 检查点按阈值 0.05、0.15、0.25、0.35 重新评估，团队成功率依次为 0%、1.56%、4.69%、64.06%。早期表现对这一未公开的 GRAFO 阈值非常敏感。在明确作者标准前，不能把 0.35 的结果等同于论文的 episode 解决率。
+- 上述 GRAFO-6(1) 离散动作单任务最终完成了 1221 次 PPO update，在 0.35 半径下达到 60/64（93.75%）。对最终检查点使用固定的 64 个 episode，按阈值 0.05、0.15、0.25、0.35 评估，结果依次为 0%、4.69%、48.44%、89.06%。参考引用源码的配置可学会该任务，但还不能与论文报告的 99.4% 单任务中位数直接比较。
+- 另一条五动作、0.35 半径的 GRAFO-4(2) 单任务训练在 245 次 PPO update（1,003,520 帧）后成功 64/64，表明早期失败的 GFS 任务在该配置下单独可学；这不能证明 FROG 切换任务后也能学会。当时还启动了连续动作、0.35 半径的 GRAFO-6(1) 消融，以区分动作编码与阈值的影响，结果见下一条。GRAFO-4(2) 最终策略在固定 key 下按 0.05、0.15、0.25、0.35 阈值评估，成功率依次为 0%、15.63%、85.94%、100%。
+- 连续动作、0.35 半径的 GRAFO-6(1) 受控运行在 245 次 update（1,003,520 帧）后成功 61/64（95.31%）；第 200 次 update 曾达到 64/64。使用相同两层隐藏 actor、但将半径设为 0.05 时，第 245 次 update 仍为 0/64。因此，在**当前实现**中，到达阈值是早期单任务失败的重要原因；这不证明作者 GRAFO 使用 0.35。
+- GFS 的两任务前缀 GRAFO-4(1) → GRAFO-4(2) 使用连续动作、0.35 半径、FROG+EWC(M)，每任务训练 100 万帧。完成后旧任务为 100%，新任务为 0%，说明只放宽阈值无法解决切换后的新任务学习。
+- 双任务 AFP 和 AP 均为 0.5；AF 为 0 仅因为第二个任务从未学会。相同预算下，GRAFO-4(2) 单任务达到 62/64（96.88%），说明失败与序列训练有关。相应 FT 运行的旧任务为 13/64（20.31%）、新任务为 62/64（96.88%）：学会新任务但明显遗忘旧任务。这指向 FROG 冻结或 EWC 惩罚造成的可塑性损失。
+- 隔离 minibatch 随机数后，单独使用 FROG 的运行在旧任务达到 64/64、新任务达到 62/64（96.88%），AP=AFP=98.44%、AF=0；因此冻结编码器并保留独立输出头本身可以学会这一序列。
+- 使用相同随机数处理的 FROG+EWC(M) 保留了旧任务 64/64，却在新任务上得到 0/64。其最终 EWC 惩罚约为 0.0094，PPO loss 约为 -0.0017。仅凭这两个标量无法证明梯度失衡，但成对结果表明，在当前实现与预算下，EWC 惩罚导致了新任务学习失败。从完全相同的第一阶段检查点继续训练、将系数改为 100，新任务仍为 0/64，旧任务仍为 64/64。这是超参数敏感性结果，不能据此断言对角 Fisher 公式有错误。
+- 系数为 1 时，新任务达到 64/64，旧任务降为 57/64（89.06%）：调系数能恢复可塑性，但没有超过单独 FROG 的双任务表现。论文系数仍保留为脚本默认值，较小系数在报告中明确标为消融设置。
+- 对 0.05 阈值、连续动作的 GRAFO-6(1) 单任务第 1,003,520 帧检查点重新评估 64 个 episode，成功为 0/64。团队在整条轨迹中“离目标最近时，各智能体目标距离的最大值”的中位数为 0.784；即使取每条轨迹最接近目标的团队状态，也没有一次落入 0.35 半径。因此失败并不只是错过最终时刻的 0.05 精度窗口。前四个智能体有时会接近目标，最后两个智能体的个体最近距离均值约为 0.234、0.241。这只是单种子、较短预算的诊断。
+- 后来在 0.05 半径下补跑到总计 5,001,216 帧、1221 次 PPO update：训练循环最终评估为 4/64（6.25%）；对最终检查点独立使用固定 key 评估为 2/64（3.125%）。64 条轨迹中有 42 条曾进入 0.35 半径，但只有 14 条进入 0.15；团队最大目标距离的轨迹内最小值中位数为 0.258。在这一更严格、尚未核实的成功标准下，结果仍远低于论文单任务结果。原检查点早于 minibatch 随机数隔离修复，补跑使用新独立 shuffle 流，因此不能称为同种子不中断续训。
+- 首次手动迁移恢复状态时错误保留了已完成阶段的评估矩阵，导致最后一次 update 出现 `IndexError`；随后在克隆的第 1200 次 update 检查点中重置矩阵，完成最后 21 次 update。
+- 旧版 CGMARL 运行使用进程全局 NumPy RNG 打乱 PPO minibatch。即使首轮 rollout 相同，W&B 初始化也可能改变第一次 update 的 minibatch 顺序。新运行把独立 NumPy shuffle RNG 保存在检查点中，不再使用全局 RNG。旧版 FT/FROG+EWC 只能作为定性参考；严格配对必须使用修复后的版本重跑。
+- 用户要求的 batch size 512 与论文每次 4096 步 rollout 划分 32 个 minibatch（batch size 128）不同。四个 PPO epoch 下，每次 update 的 actor/critic 优化步数从 128 降为 32。论文 EWC 系数是在另一更新节奏下调出的，因此以上系数消融不能证明论文超参数在原配置下本身不合适。
 
-## 2026-10-13 paired threshold runs
+## 2026-10-13：两个到达阈值的完整 GFS 实验
 
-Two full GFS-sequence runs were launched with FROG+EWC(M), explicit EWC
-coefficient 1, seed 0, continuous actions, batch size 512, 32 environments,
-and 5 million requested frames per task. They differ only in the reach
-threshold: 0.05 (`g05`, GPU 2) versus 0.35 (`g35`, GPU 1). Each writes
-`metrics.jsonl`, `evaluation.csv`, checkpoints, GIFs, and W&B data under its
-own directory in `logs/cgmarl/full_cl/`. AP is defined at the first task end;
-AF and AFP require at least two completed tasks. Threshold changes both the
-one-time bonus/freeze dynamics and the success criterion, so this is a
-training-environment comparison, not merely re-scoring a common policy.
+两条完整 GFS 序列均使用 FROG+EWC(M)、显式 EWC 系数 1、seed 0、连续动作、batch size 512、32 个并行环境，以及每任务请求 500 万帧；仅到达阈值不同：0.05（tmux `g05`，GPU 2）与 0.35（tmux `g35`，GPU 1）。两条运行均已正常完成，分别写入 `logs/cgmarl/full_cl/` 下的 `metrics.jsonl`、`evaluation.csv`、检查点和 GIF，并同步至 W&B。0.05 的最终 AP/AF/AFP 分别为 0.5742/-0.1406/0.4688；0.35 则为 0.9844/-0.0104/0.9766。AP 从第一个任务结束即可计算；AF 和 AFP 需至少完成两个任务。阈值同时改变一次性 bonus、到达后固定行为和成功判定，因此这比较的是两个**训练环境**，不是同一策略的事后重新打分。
+
+## 2026-10-14：六组完整序列对照
+
+在 0.35 阈值下，TS、CS、GFS 各完成一条 FROG+EWC(M) 和一条 FT 运行，均为连续动作、batch size 512、seed 0、每任务请求 500 万帧。FROG+EWC(M) 显式使用系数 1；FT 不启用正则，即使其 run 名中有 `lambda1`。逐阶段 CSV 和 AP/AF/AFP 结果见 `docs/grafo_cl_audit.md`。三个 setting 都出现 FT 能学新任务但最终明显遗忘旧任务的趋势；FROG+EWC(M) 的最终总体表现更高。TS 的 FROG+EWC(M) 在最后任务 GRAFO-6(3) 的最终成功率仅为 39.1%，不能把该次单种子运行描述为所有任务都学会。与论文相比，这些仅支持定性趋势；系数、batch size、未知的原版阈值和种子数均不同。

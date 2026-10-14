@@ -1,79 +1,32 @@
-# GRAFO reproduction status
+# GRAFO 复现状态
 
-The trainer now supports `--action-encoding discrete --reach-threshold 0.35`
-as a controlled match to the cited JaxInforMARL Formation defaults. The
-earlier continuous-action runs and their checkpoints remain separate. The
-authors' GRAFO source does not specify these exact choices, so the new branch
-must be labeled as a source-informed variant until single-task learning and
-cross-task results have been validated. The GRAFO actor now uses two hidden
-action layers and final distribution layers as task-specific heads; previous
-runs used an additional `ScaleHid` layer in the action path.
+训练器支持 `--action-encoding discrete --reach-threshold 0.35`，用于对照论文引用的 JaxInforMARL Formation 默认设置。此前的连续动作实验及其检查点仍单独保留。由于作者未公开 GRAFO 环境源码，不能确认其使用了相同的动作编码和阈值；这一配置应标为“参考引用源码的变体”，不能直接称为论文环境的精确复现。当前 GRAFO actor 使用两层隐藏层，并将最终的动作分布层作为任务专属输出头；更早的运行还在动作路径上额外使用了 `ScaleHid` 层。
 
-`train_grafo_continual.py` uses this repository's JAX InforMARL actor, critic,
-and PPO implementation. GRAFO tasks and sequences are transcribed from Figure
-9 and the appendix of [arXiv:2610.10302](https://arxiv.org/abs/2610.10302).
-The agent graph contains task-specific agent edges and one visible reference
-landmark. Target offsets are hidden from the policy and are used for reward,
-success checks, and evaluation rendering. Equivalent agents are assigned to
-targets by minimum total distance. Collisions are disabled.
-Policy node positions are expressed relative to the visible landmark; the
-physics state retains world coordinates. The actor concatenates its local
-observation with the four-round UniMP embedding, and the GNN has two input
-feature layers as listed in the paper. The physics integrator uses the old
-velocity for the position update. Agents reaching an assigned target are
-snapped there and held stationary, following the cited JaxInforMARL target
-environment; this particular rule is not stated in the GRAFO paper.
+## 环境与网络
 
-Training collects 128 transitions per environment and PPO update, with 32
-parallel environments and 32 environment minibatches by default. Each episode
-lasts 50 steps. The collector resets the environment and actor state at each
-episode boundary, records `done`, and PPO uses done-masked GAE and resets the
-recurrent critic state. A stage requests 5 million frames, rounded up to a
-whole 32 × 128-step update. This produces 5,001,216 actual frames per stage.
-Evaluation still runs independent 50-step episodes.
+`train_grafo_continual.py` 使用本仓库的 JAX InforMARL actor、critic 和 PPO 实现。GRAFO 任务及序列依据 [arXiv:2610.10302](https://arxiv.org/abs/2610.10302) 的图 9 和附录录入。智能体图包含任务专属的智能体间边和一个可见的参考地标。策略无法直接看到目标偏移量；偏移量只用于奖励、成功判定和评估渲染。结构等价的智能体通过最小总距离分配目标。环境关闭碰撞。
 
-The feedforward actor evaluates each 16-step training chunk in parallel; a
-test compares its log probabilities, entropy, and returned state with the
-former sequential scan. The tanh policy's entropy sample now uses the supplied
-JAX key instead of NumPy randomness at JIT trace time. This changes the
-entropy regularization stream relative to runs started before the fix, so the
-runner records `ppo_implementation_version` and rejects incompatible resume
-checkpoints. An already running Python process retains its loaded old code.
-With 32 environments, `--batch-size 128` makes 32 minibatches per PPO epoch;
-`--batch-size 512` makes 8, altering the number of optimizer steps and the
-paper configuration. Use a separate run for that throughput experiment.
+策略节点的位置以可见地标为原点表示，物理状态仍保留世界坐标。actor 将局部观测与四轮 UniMP 消息传递后的嵌入拼接；GNN 的输入特征部分采用论文超参数表中的两层。物理积分先使用旧速度更新位置。智能体到达分配的目标后会被吸附到目标并保持静止，这遵循所引用的 JaxInforMARL 目标环境，但 GRAFO 论文没有明确写出该规则。
 
-For continual experiments, each graph gives every agent a one-hot task
-identity, and the actor keeps separate output heads for previous tasks. The
-task sequence transfers the shared actor and critic weights at each switch.
-EWC and MAS estimate parameter importance from 64 independent 50-step
-trajectories by default. Their multi variants retain one anchor and
-importance matrix per completed task; online variants decay the previous
-importance by 0.9 before adding the new matrix and use the latest anchor.
-L2 uses a unit-weight penalty around the latest task's actor weights. All
-three regularize shared actor parameters but leave the critic and task-specific
-output head unregularized. FROG freezes the learned GNN from task two onward.
-The runner selects the method-specific coefficients from the paper unless
-`--regularization-coefficient` is explicitly provided. See the source audit
-for remaining uncertainty about exact EWC/MAS score normalization.
+## 训练与持续学习流程
 
-The environment is still an **approximation of the paper's Formation
-environment**. The paper says its GRAFO transitions and observation/action
-spaces match Formation from Agarwal et al. (2020). We aligned the known MPE
-Formation constants from the [original InforMARL Formation scenario](https://github.com/nsidn98/InforMARL)
-(dt 0.1, damping 0.25, action force scale 5, initial agents in [-1, 1],
-initial landmark in [-0.5, 0.5], reach threshold 0.05). The cited
-[JaxInforMARL repository](https://github.com/jselvaraaj/JaxInforMARL)
-contains a Target MPE environment, not the authors' GRAFO source; its
-continuous-action handler is incomplete. The GRAFO paper does not report the
-reward bonus magnitude or prove that its exact Formation variant used these
-initialization values. We keep continuous two-axis actions, a task-edge
-graph with a visible landmark, and an assumed one-time bonus of 1. The paper
-does not publish an action encoding, reach radius, or bonus magnitude. These
-differences must be resolved
-or tested before reporting numerical agreement with the paper.
+每次 PPO update 从 32 个并行环境各采集 128 个 transition；默认划分为 32 个环境 minibatch。每个 episode 最多 50 步。采集器在 episode 边界重置环境和 actor 状态并记录 `done`；PPO 的 GAE 对 `done` 做掩码，循环 critic 状态也在边界重置。每阶段请求 500 万帧，向上取整到完整的 `32 × 128` 步 update，因此实际为 5,001,216 帧。评估使用独立的 50 步 episode。
 
-Single-task validation uses the same runner as continual learning:
+前馈 actor 对每段 16 步训练数据并行计算。测试将其动作对数概率、熵和返回状态与原先的顺序扫描逐项比较。tanh 策略估计熵时，现使用调用方传入的 JAX key，而不是在 JIT tracing 阶段调用 NumPy 随机数。这改变了相对于修复前运行的熵正则随机流；训练器记录 `ppo_implementation_version`，并拒绝不兼容检查点的恢复。已启动的 Python 进程仍使用启动时载入的旧代码。
+
+使用 32 个环境时，`--batch-size 128` 对应每个 PPO epoch 32 个 minibatch；`--batch-size 512` 对应 8 个，因此也改变了优化器更新次数，不能当作论文原配置。吞吐量实验应使用单独的 run。
+
+持续学习实验在每个智能体节点上提供任务身份的 one-hot 编码，并为不同任务保留独立的 actor 输出头。切换任务时，共享 actor 和 critic 参数继续训练。EWC 与 MAS 默认从 64 条独立、各最多 50 步的轨迹估计参数重要性。多任务版本为每个已完成任务保存参数锚点和重要性矩阵；在线版本将旧重要性乘以 0.9 再加上新矩阵，并使用最新锚点。L2 使用权重为 1 的惩罚，约束 actor 参数相对上一任务结束时的值。这三种方法都只正则化共享 actor 参数，不正则化 critic 或任务专属输出头。FROG 从第二个任务起冻结已经学到的 GNN。若未显式传入 `--regularization-coefficient`，训练器按方法选择论文中的系数；EWC/MAS 重要性分数的精确归一化仍见源码审计文档。
+
+## 与论文环境的差距
+
+当前环境仍是**论文 Formation 环境的近似实现**。论文称 GRAFO 的状态转移与观测、动作空间沿用 Agarwal 等人（2020）的 Formation。我们对齐了[原始 InforMARL Formation 场景](https://github.com/nsidn98/InforMARL)中已知的 MPE 常量：时间步长 0.1、阻尼 0.25、动作力尺度 5、智能体初始位置范围 `[-1, 1]`、地标初始位置范围 `[-0.5, 0.5]`，以及到达阈值 0.05。
+
+论文引用的 [JaxInforMARL 仓库](https://github.com/jselvaraaj/JaxInforMARL)包含 Target MPE 环境，但不是作者的 GRAFO 源码；其中连续动作的处理尚未实现。GRAFO 论文没有报告奖励 bonus 的大小，也无法证明其 Formation 变体采用了这些精确的初始化数值。当前实现保留二维连续动作、带可见地标的任务图，并假定一次性到达奖励为 1。论文未给出动作编码、到达半径或奖励 bonus 的具体数值。报告与论文的数值一致性之前，必须先解决这些差异或做敏感性实验。
+
+## 运行与评估
+
+单任务验证与持续学习共用训练入口：
 
 ```bash
 bash scripts/run_grafo_single.sh GRAFO-3 \
@@ -81,18 +34,13 @@ bash scripts/run_grafo_single.sh GRAFO-3 \
   --output logs/cgmarl/single_grafo3_seed0
 ```
 
-Run each distinct task in TS, CS, and GFS with seeds 0, 1, and 2 before
-starting a full continual comparison. For a local smoke test, pass
-`--frames-per-task 128 --n-env 1 --wandb-mode disabled --no-gif`.
-The paper's single-task table covers the six TS tasks with five seeds and
-reports success rates near 1.0; the broader 13-task, three-seed gate here is
-the agreed validation protocol and should be labeled separately in reports.
+此前约定的单任务验收范围是 TS、CS、GFS 中所有不同任务，每项使用种子 0、1、2。局部冒烟测试可传入 `--frames-per-task 128 --n-env 1 --wandb-mode disabled --no-gif`。论文单任务表只覆盖 TS 中的六个任务，使用五个种子，报告成功率接近 1.0；这里的更广任务范围和三种子门槛应在报告中另行标注。当前六组完整序列对照只使用 seed 0，不能替代这一验收。
 
 ```bash
 bash scripts/validate_grafo_single_tasks.sh logs/cgmarl/single_task_validation
 ```
 
-Continual TS example:
+持续学习 TS 示例：
 
 ```bash
 conda run --no-capture-output -n dgppo python train_grafo_continual.py \
@@ -102,11 +50,4 @@ conda run --no-capture-output -n dgppo python train_grafo_continual.py \
   --wandb-mode online --output logs/cgmarl/ts_frog_ewc_seed0
 ```
 
-The default W&B project is `cgmarl`. Authenticate W&B in the `dgppo` conda
-environment before an online run. The runner also writes local JSONL metrics,
-checkpoints, tqdm progress, eval success and returns, and optional evaluation
-GIFs. `eval/<task>/success_rate` counts episodes reaching the full formation
-at any step within 50 steps, matching the paper's time-limit definition;
-`eval/<task>/final_success_rate` checks only the last step. Runs created
-before this metric correction logged last-step success under `success_rate`.
-Use `--resume <output>/checkpoints/latest` to continue a run.
+默认 W&B 项目名为 `cgmarl`。在线运行前需在 `dgppo` conda 环境中登录 W&B。训练器还会在本地写入 JSONL 指标和检查点，显示 tqdm 进度，记录评估成功率与回报，并可生成评估 GIF。`eval/<task>/success_rate` 统计 50 步内曾到达完整编队的 episode 比例，与论文的时限内成功定义一致；`eval/<task>/final_success_rate` 只检查最后一步。修正该指标之前创建的 run 将“最后一步成功率”写在 `success_rate` 字段下。可使用 `--resume <output>/checkpoints/latest` 恢复训练。

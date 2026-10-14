@@ -1,85 +1,49 @@
-# GRAFO continual learning audit
+# GRAFO 持续学习实现审计
 
-Source: [GRAFO paper and appendix](https://arxiv.org/html/2610.10302v1),
-especially the empirical setting, task identities, metrics, and hyperparameter
-table. The authors' GRAFO/CL source has not been located, so EWC and MAS
-normalization cannot be verified exactly.
+主要依据是 [GRAFO 论文及附录](https://arxiv.org/html/2610.10302v1)，尤其是实验设置、任务身份、评估指标和超参数表。尚未找到作者的 GRAFO/持续学习源码，因此无法精确核对 EWC 和 MAS 的归一化方式。
 
-## Implemented sequence
+## 已实现的任务序列
 
-`train_grafo_continual.py` iterates through TS, CS, GFS, TS-inc, or TS-dec.
-Each task gets 5 million environment frames by default. At a task boundary,
-the shared actor and critic transfer to the next task; the actor receives a
-new output head. Evaluation restores each previous task's head and graph,
-forming the task-by-task success matrix for AFP, AF, and AP. Multi-task
-observations carry one-hot task identity on agent nodes.
+`train_grafo_continual.py` 支持按 TS、CS、GFS、TS-inc 或 TS-dec 的顺序训练。默认每个任务采集 500 万环境帧。切换任务时，共享 actor 和 critic 的参数传递到下一任务，actor 则使用新的任务专属输出头。评估时恢复各旧任务的输出头和图，得到按训练阶段与评估任务排列的成功率矩阵，并据此计算 AFP、AF 和 AP。多任务观测在智能体节点上携带任务身份的 one-hot 编码。
 
-## Methods
+## 方法
 
-| Method | Current mechanism |
+| 方法 | 当前实现 |
 | --- | --- |
-| FT | Shared actor and critic continue without regularization. |
-| L2 | Penalizes distance of shared actor weights from the preceding task's final weights. |
-| EWC (M) | Uses the squared per-sample gradient of sampled action log probability as empirical diagonal Fisher; stores one anchor/importance matrix per prior task and sums their penalties. |
-| EWC (O) | Uses the latest anchor and a running importance matrix, `0.9 × old + new`. |
-| MAS (M) | Uses the absolute per-sample gradient of mean squared policy mode; stores one anchor/importance matrix per prior task. |
-| MAS (O) | Uses the latest anchor and the same decayed aggregation as EWC (O). |
-| FROG | Freezes the graph encoder after the first task, alongside any method above. |
+| FT | 共享 actor 和 critic 继续训练，不使用正则化。 |
+| L2 | 惩罚共享 actor 参数偏离上一任务结束时的参数。 |
+| EWC (M) | 用采样动作对数概率的逐样本梯度平方估计经验对角 Fisher；为每个已完成任务保存参数锚点和重要性矩阵，并累加各任务的惩罚项。 |
+| EWC (O) | 只使用最新参数锚点，重要性矩阵按 `0.9 × 旧矩阵 + 新矩阵` 更新。 |
+| MAS (M) | 用策略输出众数的均方值对参数的逐样本梯度绝对值估计重要性；为每个已完成任务保存参数锚点和重要性矩阵。 |
+| MAS (O) | 使用最新参数锚点，并采用与 EWC (O) 相同的衰减累计方式。 |
+| FROG | 学完第一个任务后冻结图编码器，可与上述方法组合。 |
 
-The critic and task-specific output head are not regularized. Importance is
-estimated from 64 independent trajectories of up to 50 valid steps each.
-Steps after early success are masked from the estimate. Paper coefficients
-are selected by method, online/multi mode, and FROG flag unless overridden.
+critic 和任务专属输出头不参与正则化。参数重要性默认取自 64 条独立轨迹，每条最多使用 50 个有效时间步；若提前成功，后续时间步不计入估计。未显式指定系数时，脚本根据方法、在线或多任务模式，以及是否启用 FROG，选用论文表中的系数。
 
-## Verification and limits
+## 验证结果与限制
 
-- A two-task CPU run completed for EWC, L2, and MAS+FROG, including task
-  switches, prior-task evaluation, checkpoints, and final metrics. These
-  one-update runs verify execution only, not learning or retention.
-- Targeted checks confirm one-hot task input, positive finite EWC/MAS
-  importance, positive L2/EWC/MAS penalties after parameter movement, and
-  FROG's encoder gradient mask.
-- Initial full-sequence experiments exposed new-task learning failures. A
-  later six-run, seed-0 comparison completed on TS, CS, and GFS with a 0.35
-  reach threshold and an explicit FROG+EWC(M) coefficient of 1. Exact
-  normalization of the authors' EWC/MAS scores and the scope of their
-  task-specific heads remain unverified without their implementation.
-- Runs with `--batch-size 512` use 8 PPO minibatches per epoch instead of
-  the paper's 32 and must be reported as a throughput variant.
+- EWC、L2 和 MAS+FROG 均完成过双任务 CPU 冒烟运行，覆盖任务切换、旧任务评估、检查点保存和最终指标。这些仅训练一次 update 的运行验证了流程，不足以判断能否学会或保留任务。
+- 定向检查确认了任务 one-hot 输入、有限且为正的 EWC/MAS 重要性、参数移动后为正的 L2/EWC/MAS 惩罚，以及 FROG 对图编码器梯度的屏蔽。
+- 早期完整序列暴露出新任务学不会的问题。随后在 TS、CS、GFS 上完成了六组 seed 0 对照：到达阈值为 0.35，FROG+EWC(M) 显式使用系数 1。由于没有作者源码，EWC/MAS 分数的精确归一化方式和任务专属输出头的具体范围仍未核实。
+- `--batch-size 512` 每个 PPO epoch 使用 8 个 minibatch，论文为 32 个；报告时必须将它标为改变优化步数的吞吐量变体。
 
-## Full-sequence run records
+## 完整任务序列的运行记录
 
-`scripts/run_grafo_cl_full.sh` launches a full TS, CS, or GFS sequence with
-5 million frames per task and batch size 512. The six completed comparison
-runs used FROG+EWC(M) or FT on each setting. Each run writes `metrics.jsonl`,
-checkpoints, evaluation GIFs, and a W&B `eval/video` upload at each evaluation.
-The trainer evaluates every 100 PPO updates and at the end of each task,
-including all previously learned tasks. The trainer calls
-`scripts/export_grafo_cl_csv.py` after each evaluation to update
-`evaluation.csv`; `stage_complete=1` marks task-end rows, which
-include AP and, from the second task onward, AF and AFP.
+`scripts/run_grafo_cl_full.sh` 可启动 TS、CS 或 GFS 完整序列，配置为每任务 500 万帧、batch size 512。已完成的六组对照在每种 setting 下分别使用 FROG+EWC(M) 和 FT。每个 run 都保存 `metrics.jsonl`、检查点和评估 GIF，并在评估时向 W&B 上传 `eval/video`。训练器每 100 次 PPO update 以及每个任务结束时评估当前任务和全部已学任务；每次评估后调用 `scripts/export_grafo_cl_csv.py` 更新 `evaluation.csv`。CSV 中 `stage_complete=1` 表示该任务阶段结束，记录 AP；从第二个任务结束起还记录 AF 和 AFP。
 
-| Setting | Method | AP | AF | AFP |
+| Setting | 方法 | AP | AF | AFP |
 | --- | --- | ---: | ---: | ---: |
-| TS | FROG+EWC(M), coefficient 1 | 0.8802 | -0.0531 | 0.8359 |
+| TS | FROG+EWC(M)，系数 1 | 0.8802 | -0.0531 | 0.8359 |
 | TS | FT | 0.9870 | -0.8625 | 0.2682 |
-| CS | FROG+EWC(M), coefficient 1 | 0.9438 | -0.1484 | 0.8250 |
+| CS | FROG+EWC(M)，系数 1 | 0.9438 | -0.1484 | 0.8250 |
 | CS | FT | 0.9688 | -0.9297 | 0.2250 |
-| GFS | FROG+EWC(M), coefficient 1 | 0.9844 | -0.0104 | 0.9766 |
+| GFS | FROG+EWC(M)，系数 1 | 0.9844 | -0.0104 | 0.9766 |
 | GFS | FT | 0.9922 | -0.9844 | 0.2539 |
 
-All six runs used continuous actions, threshold 0.35, batch size 512, and
-one seed. FT has no regularization even though its run name includes
-`lambda1`. These are controlled comparisons within this implementation,
-not the paper's 10-seed numerical reproduction. Their per-run CSV files are
-under `logs/cgmarl/full_cl/` and W&B project `cgmarl`.
+六组 run 都使用连续动作、0.35 到达阈值、batch size 512 和单个种子。FT 不使用正则化，尽管其 run 名称中含有 `lambda1`。这些结果只能作为当前实现内部的受控对照，不能视为论文的十种子数值复现。各 run 的 CSV 位于 `logs/cgmarl/full_cl/`，W&B 项目为 `cgmarl`。
 
-## Follow-up organization
+## 后续整理
 
-- [ ] Move the CGMARL-specific environment, algorithm, training entry point,
-  scripts, tests, and documentation into one clearly scoped package; update
-  imports and commands without changing the training behavior.
-- [ ] Run the relevant checks against the reorganized package and confirm
-  checkpoints and result-reading paths still work.
-- [ ] Keep `logs/` in its current location; do not move training outputs into
-  the package or include them in the commit.
+- [ ] 将 CGMARL 专属环境、算法、训练入口、脚本、测试和文档整理到范围清晰的独立包中；更新导入和命令，同时保持训练行为不变。
+- [ ] 对整理后的包运行相关检查，并确认现有检查点和结果读取路径仍可使用。
+- [ ] 保持 `logs/` 在原位置；不要将训练输出移入代码包或提交到 Git。
