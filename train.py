@@ -66,16 +66,20 @@ def _train_rl(args):
     env = make_env(
         env_id=args.env,
         num_agents=args.num_agents,
+        max_step=args.max_step,
         num_obs=args.obs,
         n_rays=args.n_rays,
         full_observation=args.full_observation,
+        grafo_task=args.grafo_task,
     )
     env_test = make_env(
         env_id=args.env,
         num_agents=args.num_agents,
+        max_step=args.max_step,
         num_obs=args.obs,
         n_rays=args.n_rays,
         full_observation=args.full_observation,
+        grafo_task=args.grafo_task,
     )
 
     horizon = env.max_episode_steps
@@ -408,9 +412,11 @@ def main():
 
     # required arguments
     parser.add_argument("--env", type=str, required=True)
+    parser.add_argument("--grafo-task", type=str, default="GRAFO-3")
     parser.add_argument("-n", "--num-agents", type=int, required=True)
     parser.add_argument("--algo", type=str, required=True)
     parser.add_argument("--obs", type=int, required=True)
+    parser.add_argument("--max-step", type=int, default=None)
 
     # custom arguments
     parser.add_argument("--seed", type=int, default=0)

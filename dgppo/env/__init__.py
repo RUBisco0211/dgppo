@@ -2,6 +2,7 @@ from typing import Optional
 
 from .base import MultiAgentEnv
 from dgppo.env.mpe import MPETarget, MPESpread, MPELine, MPEFormation, MPECorridor, MPEConnectSpread
+from dgppo.env.mpe import GRAFO, GRAFO_TASKS
 from dgppo.env.lidar_env import LidarSpread, LidarTarget, LidarLine, LidarBicycleTarget
 from dgppo.env.vmas import VMASWheel, VMASReverseTransport, VMASNavigation, VMASNavigationObs
 
@@ -12,6 +13,7 @@ ENV = {
     'MPESpread': MPESpread,
     'MPELine': MPELine,
     'MPEFormation': MPEFormation,
+    'GRAFO': GRAFO,
     'MPECorridor': MPECorridor,
     'MPEConnectSpread': MPEConnectSpread,
     'LidarSpread': LidarSpread,
@@ -38,10 +40,11 @@ def make_env(
         full_observation: bool = False,
         num_obs: Optional[int] = None,
         n_rays: Optional[int] = None,
+        grafo_task: str = 'GRAFO-3',
 ) -> MultiAgentEnv:
     assert env_id in ENV.keys(), f'Environment {env_id} not implemented.'
     params = ENV[env_id].PARAMS.copy()
-    max_step = DEFAULT_MAX_STEP if max_step is None else max_step
+    max_step = (50 if env_id == 'GRAFO' else DEFAULT_MAX_STEP) if max_step is None else max_step
     if num_obs is not None:
         params['n_obs'] = num_obs
     if n_rays is not None:
@@ -49,6 +52,10 @@ def make_env(
     if full_observation:
         area_size = params['default_area_size']
         params['comm_radius'] = area_size * 10
+    if env_id == 'GRAFO':
+        task = GRAFO_TASKS[grafo_task]
+        params['n_obs'] = 0
+        return GRAFO(task=task, num_agents=num_agents, max_step=max_step, params=params)
     return ENV[env_id](
         num_agents=num_agents,
         area_size=None,

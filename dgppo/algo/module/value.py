@@ -6,6 +6,7 @@ from typing import Type, Any
 
 from ...nn.mlp import MLP
 from ...nn.gnn import GraphTransformerGNN, GNN
+from ...nn.unimp import UniMPGNN
 from ...nn.rnn import RNN
 from ...nn.utils import default_nn_init
 from ...utils.typing import Array, Params, PRNGKey
@@ -100,7 +101,12 @@ class ValueNet:
             use_global_info: bool = False,
             n_heads: int = 3,
             base_node_dim: int = 0, road_slots: int = 0,
-            road_feature_dim: int = 0
+            road_feature_dim: int = 0,
+            gnn_arch: str = "graph_transformer",
+            hidden_dim: int = 64,
+            gnn_key_dim: int = 16,
+            gnn_heads: int = 3,
+            head_layers: int = 2,
     ):
         self.node_dim = node_dim
         self.edge_dim = edge_dim
@@ -110,18 +116,23 @@ class ValueNet:
         self.decompose = decompose
         self.use_global_info = use_global_info
 
-        self.gnn = ft.partial(
-            GraphTransformerGNN,
-            msg_dim=32,
-            out_dim=gnn_out_dim,
-            n_heads=n_heads,
-            n_layers=gnn_layers,
-            base_node_dim=base_node_dim, road_slots=road_slots,
-            road_feature_dim=road_feature_dim
-        )
+        if gnn_arch == "unimp":
+            self.gnn = ft.partial(UniMPGNN, hidden_dim=hidden_dim,
+                                  n_heads=gnn_heads, key_dim=gnn_key_dim,
+                                  n_layers=gnn_layers)
+        else:
+            self.gnn = ft.partial(
+                GraphTransformerGNN,
+                msg_dim=32,
+                out_dim=gnn_out_dim,
+                n_heads=n_heads,
+                n_layers=gnn_layers,
+                base_node_dim=base_node_dim, road_slots=road_slots,
+                road_feature_dim=road_feature_dim
+            )
         self.head = ft.partial(
             MLP,
-            hid_sizes=(64, 64),
+            hid_sizes=(hidden_dim,) * head_layers,
             act=nn.relu,
             act_final=True,
             name='ValueGNNHead'
@@ -129,7 +140,7 @@ class ValueNet:
 
         self.use_rnn = use_rnn
         if use_rnn:
-            self.rnn_base = ft.partial(nn.LSTMCell if use_lstm else nn.GRUCell, features=64)
+            self.rnn_base = ft.partial(nn.LSTMCell if use_lstm else nn.GRUCell, features=hidden_dim)
             self.rnn = ft.partial(
                 RNN,
                 rnn_cls=self.rnn_base,

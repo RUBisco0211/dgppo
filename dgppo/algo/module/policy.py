@@ -12,6 +12,7 @@ from ...utils.typing import Action, Array
 from ...utils.graph import GraphsTuple
 from ...nn.utils import default_nn_init, scaled_init
 from ...nn.gnn import GNN, GraphTransformerGNN
+from ...nn.unimp import UniMPGNN
 from ...nn.rnn import RNN
 from ...nn.mlp import MLP
 from ...utils.typing import PRNGKey, Params
@@ -21,12 +22,15 @@ class PolicyNet(nn.Module):
     gnn_cls: Type[GNN]
     head_cls: Type[nn.Module]
     rnn_cls: Type[RNN] = None
+    concat_local_obs: bool = False
 
     @nn.compact
     def __call__(
             self, graph: GraphsTuple, rnn_state: Array, node_type: int = None, n_type: int = None
     ) -> [Array, Array]:
         x = self.gnn_cls()(graph, node_type, n_type)
+        if self.concat_local_obs:
+            x = jnp.concatenate((graph.type_nodes(node_type, n_type), x), axis=-1)
         x = self.head_cls()(x)
         if self.rnn_cls is not None:
             x, rnn_state = self.rnn_cls()(x, rnn_state)
@@ -50,6 +54,7 @@ class TanhNormal(PolicyDistribution):
     scale_final: float = 0.01
     std_dev_min: float = 1e-5
     std_dev_init: float = 0.5
+    scale_hidden_dim: int | None = 64
 
     @property
     def std_dev_init_inv(self):
@@ -63,8 +68,11 @@ class TanhNormal(PolicyDistribution):
             self, obs: GraphsTuple, rnn_state: Array, n_agents: int, *args, **kwargs
     ) -> [tfd.Distribution, Array]:
         x, rnn_state = self.base_cls()(obs, rnn_state=rnn_state, node_type=0, n_type=n_agents)
-        scaler_init = scaled_init(default_nn_init(), self.scale_final)
-        feats_scaled = nn.Dense(64, kernel_init=scaler_init, name="ScaleHid")(x)
+        if self.scale_hidden_dim is None:
+            feats_scaled = x
+        else:
+            scaler_init = scaled_init(default_nn_init(), self.scale_final)
+            feats_scaled = nn.Dense(self.scale_hidden_dim, kernel_init=scaler_init, name="ScaleHid")(x)
 
         means = nn.Dense(self.nu, kernel_init=default_nn_init(), name="OutputDenseMean")(feats_scaled)
         stds_trans = nn.Dense(self.nu, kernel_init=default_nn_init(), name="OutputDenseStdTrans")(feats_scaled)
@@ -72,6 +80,25 @@ class TanhNormal(PolicyDistribution):
         # stds = self.std_dev_min
         distribution = tfd.Normal(loc=means, scale=stds)
         return tfd.Independent(TanhTransformedDistribution(distribution), reinterpreted_batch_ndims=1), rnn_state
+
+    @property
+    def nu(self):
+        return self._nu
+
+
+class OneHotAction(PolicyDistribution):
+    base_cls: Type[PolicyNet]
+    _nu: int
+
+    @nn.compact
+    def __call__(
+            self, obs: GraphsTuple, rnn_state: Array, n_agents: int, *args, **kwargs
+    ) -> [tfd.Distribution, Array]:
+        x, rnn_state = self.base_cls()(obs, rnn_state=rnn_state,
+                                       node_type=0, n_type=n_agents)
+        logits = nn.Dense(self.nu, kernel_init=default_nn_init(),
+                          name="OutputDenseLogits")(x)
+        return tfd.OneHotCategorical(logits=logits, dtype=jnp.float32), rnn_state
 
     @property
     def nu(self):
@@ -145,28 +172,40 @@ class PPOPolicy(MultiAgentPolicy):
             base_node_dim: int = 0,
             road_slots: int = 0,
             road_feature_dim: int = 0,
+            gnn_arch: str = "graph_transformer",
+            hidden_dim: int = 64,
+            gnn_key_dim: int = 16,
+            gnn_heads: int = 3,
+            scale_hidden_dim: int | None = 64,
+            discrete_actions: bool = False,
     ):
         super().__init__(node_dim, edge_dim, n_agents, action_dim)
         self.gnn_out_dim = gnn_out_dim
         self.use_rnn = use_rnn
-        self.gnn = ft.partial(
-            GraphTransformerGNN,
-            msg_dim=32,
-            out_dim=gnn_out_dim,
-            n_heads=3,
-            n_layers=gnn_layers,
-            base_node_dim=base_node_dim, road_slots=road_slots,
-            road_feature_dim=road_feature_dim
-        )
+        self.discrete_actions = discrete_actions
+        if gnn_arch == "unimp":
+            self.gnn = ft.partial(UniMPGNN, hidden_dim=hidden_dim,
+                                  n_heads=gnn_heads, key_dim=gnn_key_dim,
+                                  n_layers=gnn_layers)
+        else:
+            self.gnn = ft.partial(
+                GraphTransformerGNN,
+                msg_dim=32,
+                out_dim=gnn_out_dim,
+                n_heads=3,
+                n_layers=gnn_layers,
+                base_node_dim=base_node_dim, road_slots=road_slots,
+                road_feature_dim=road_feature_dim
+            )
         self.head = ft.partial(
             MLP,
-            hid_sizes=(64, 64),
+            hid_sizes=(hidden_dim, hidden_dim),
             act=nn.relu,
             act_final=True,
             name='PolicyGNNHead'
         )
         if use_rnn:
-            self.rnn_base = ft.partial(nn.LSTMCell if use_lstm else nn.GRUCell, features=64)
+            self.rnn_base = ft.partial(nn.LSTMCell if use_lstm else nn.GRUCell, features=hidden_dim)
             self.rnn = ft.partial(
                 RNN,
                 rnn_cls=self.rnn_base,
@@ -177,15 +216,23 @@ class PPOPolicy(MultiAgentPolicy):
                 gnn_cls=self.gnn,
                 head_cls=self.head,
                 rnn_cls=self.rnn,
+                concat_local_obs=gnn_arch == "unimp",
             )
-            self.dist = TanhNormal(base_cls=self.policy_base, _nu=action_dim)
+            self.dist = (OneHotAction(base_cls=self.policy_base, _nu=action_dim)
+                         if discrete_actions else
+                         TanhNormal(base_cls=self.policy_base, _nu=action_dim,
+                                    scale_hidden_dim=scale_hidden_dim))
         else:
             self.policy_base = ft.partial(
                 PolicyNet,
                 gnn_cls=self.gnn,
                 head_cls=self.head,
+                concat_local_obs=gnn_arch == "unimp",
             )
-            self.dist = TanhNormal(base_cls=self.policy_base, _nu=action_dim)
+            self.dist = (OneHotAction(base_cls=self.policy_base, _nu=action_dim)
+                         if discrete_actions else
+                         TanhNormal(base_cls=self.policy_base, _nu=action_dim,
+                                    scale_hidden_dim=scale_hidden_dim))
 
     def initialize_carry(self, key: PRNGKey) -> tuple[Array | Any, Array | Any] | Array:
         if self.use_rnn:
@@ -213,5 +260,5 @@ class PPOPolicy(MultiAgentPolicy):
         rnn_state: Array
         dist, rnn_state = self.dist.apply(params, obs, rnn_state, n_agents=self.n_agents)
         log_pi = dist.log_prob(action)
-        entropy = dist.entropy(seed=key)
+        entropy = dist.entropy() if self.discrete_actions else dist.entropy(seed=key)
         return log_pi, entropy, rnn_state

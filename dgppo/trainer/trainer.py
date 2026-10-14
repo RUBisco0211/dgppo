@@ -265,7 +265,8 @@ class Trainer:
             return {}
         videos_dir = pathlib.Path(self.log_dir) / "videos"
         videos_dir.mkdir(parents=True, exist_ok=True)
-        video_format = "mp4" if writers.is_available("ffmpeg") else "gif"
+        video_format = "gif" if self.env_test.__class__.__name__ == "GRAFO" else (
+            "mp4" if writers.is_available("ffmpeg") else "gif")
         video_path = videos_dir / f"latest_eval.{video_format}"
         single_rollout = tree_index(rollouts, 0)
         costs = np.asarray(single_rollout.costs)
@@ -347,6 +348,11 @@ class Trainer:
                         "eval/cost": cost,
                         "eval/unsafe_frac": unsafe_frac,
                     }
+                    if self.env_test.__class__.__name__ == "GRAFO":
+                        final_graphs = jax.tree_util.tree_map(
+                            lambda x: x[:, -1], test_rollouts.next_graph)
+                        eval_info["eval/success_rate"] = float(jnp.mean(
+                            jax.vmap(self.env_test.success)(final_graphs)))
                     eval_info |= _rollout_metrics(test_rollouts, "eval", self.env_test.cost_components)
                     if hasattr(self.algo, "diagnostic_metrics"):
                         # Diagnostics are read-only and reuse the fixed-seed eval
@@ -365,6 +371,12 @@ class Trainer:
                         f'{reward_min:7.2f}/{reward_max:7.2f}, cost: {cost:8.4f}, '
                         f'unsafe_frac: {unsafe_frac:6.2f}'
                     )
+                    if self.env_test.__class__.__name__ == "GRAFO":
+                        eval_verbose = (
+                            f'step: {step:3}, time: {time_since_start:5.0f}s, '
+                            f'reward: {reward_mean:9.4f}, success: '
+                            f'{eval_info["eval/success_rate"]:.2f}'
+                        )
                     tqdm.write(eval_verbose)
                     log_info |= eval_info
                     media_info |= self._eval_video(test_rollouts, step)
@@ -402,6 +414,10 @@ class Trainer:
                 training_start = time()
                 update_info = self.algo.update(rollouts, step)
                 log_info |= update_info | _training_metrics(update_info)
+                if self.env.__class__.__name__ == "GRAFO":
+                    log_info = {key: value for key, value in log_info.items()
+                                if not (key == "eval/cost" or key == "eval/unsafe_frac"
+                                        or "/cost/" in key or "/safety/" in key)}
                 log_info["time/training_sec"] = time() - training_start
                 log_info["time/iteration_sec"] = time() - iteration_start
                 scalar_info = _wandb_scalars(log_info)
@@ -411,11 +427,12 @@ class Trainer:
                 wandb.log(scalar_info | media_info)
                 self.update_steps += 1
 
-                pbar.set_postfix(
+                postfix = dict(
                     reward=collection_info["collection/reward/episode_reward_mean"],
-                    unsafe=collection_info["collection/safety/unsafe_rate"],
-                    loss=_scalar(update_info.get("policy/loss", np.nan)),
-                )
+                    loss=_scalar(update_info.get("policy/loss", np.nan)))
+                if self.env.__class__.__name__ != "GRAFO":
+                    postfix["unsafe"] = collection_info["collection/safety/unsafe_rate"]
+                pbar.set_postfix(**postfix)
                 if step < self.steps:
                     pbar.update(1)
 

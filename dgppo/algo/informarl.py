@@ -46,9 +46,19 @@ class InforMARL(Algorithm):
             clip_eps: float = 0.25,
             gae_lambda: float = 0.95,
             coef_ent: float = 1e-2,
+            value_coefficient: float = 1.0,
             max_grad_norm: float = 2.0,
             seed: int = 0,
             use_rnn: bool = True,
+            actor_use_rnn: Optional[bool] = None,
+            critic_use_rnn: Optional[bool] = None,
+            gnn_arch: str = "graph_transformer",
+            hidden_dim: int = 64,
+            gnn_key_dim: int = 16,
+            gnn_heads: int = 3,
+            policy_extra_hidden: bool = True,
+            discrete_actions: bool = False,
+            critic_head_layers: int = 2,
             rnn_layers: int = 1,
             rnn_step: int = 16,
             use_lstm: bool = False,
@@ -76,9 +86,16 @@ class InforMARL(Algorithm):
         self.clip_eps = clip_eps
         self.gae_lambda = gae_lambda
         self.coef_ent = coef_ent
+        self.value_coefficient = value_coefficient
         self.max_grad_norm = max_grad_norm
         self.seed = seed
         self.use_rnn = use_rnn
+        self.actor_use_rnn = use_rnn if actor_use_rnn is None else actor_use_rnn
+        self.critic_use_rnn = use_rnn if critic_use_rnn is None else critic_use_rnn
+        self.gnn_arch = gnn_arch
+        self.policy_extra_hidden = policy_extra_hidden
+        self.discrete_actions = discrete_actions
+        self.hidden_dim = hidden_dim
         self.rnn_layers = rnn_layers
         self.rnn_step = rnn_step
         self.use_lstm = use_lstm
@@ -104,11 +121,17 @@ class InforMARL(Algorithm):
             edge_dim=self.edge_dim,
             n_agents=self.n_agents,
             action_dim=self.action_dim,
-            use_rnn=self.use_rnn,
+            use_rnn=self.actor_use_rnn,
             rnn_layers=self.rnn_layers,
             gnn_layers=self.actor_gnn_layers,
             gnn_out_dim=64,
-            use_lstm=self.use_lstm
+            use_lstm=self.use_lstm,
+            gnn_arch=gnn_arch,
+            hidden_dim=hidden_dim,
+            gnn_key_dim=gnn_key_dim,
+            gnn_heads=gnn_heads,
+            scale_hidden_dim=hidden_dim if policy_extra_hidden else None,
+            discrete_actions=discrete_actions,
         )
 
         # initialize the rnn state
@@ -141,12 +164,17 @@ class InforMARL(Algorithm):
             node_dim=self.node_dim,
             edge_dim=self.edge_dim,
             n_agents=self.n_agents,
-            use_rnn=self.use_rnn,
+            use_rnn=self.critic_use_rnn,
             rnn_layers=self.rnn_layers,
             gnn_layers=self.Vl_gnn_layers,
             gnn_out_dim=64,
             use_lstm=self.use_lstm,
-            decompose=False
+            decompose=False,
+            gnn_arch=gnn_arch,
+            hidden_dim=hidden_dim,
+            gnn_key_dim=gnn_key_dim,
+            gnn_heads=gnn_heads,
+            head_layers=critic_head_layers,
         )
 
         # initialize the rnn state
@@ -214,6 +242,10 @@ class InforMARL(Algorithm):
             'max_grad_norm': self.max_grad_norm,
             'seed': self.seed,
             'use_rnn': self.use_rnn,
+            'actor_use_rnn': self.actor_use_rnn,
+            'critic_use_rnn': self.critic_use_rnn,
+            'gnn_arch': self.gnn_arch,
+            'hidden_dim': self.hidden_dim,
             'rnn_layers': self.rnn_layers,
             'rnn_step': self.rnn_step,
             'use_lstm': self.use_lstm,
@@ -267,7 +299,11 @@ class InforMARL(Algorithm):
         assert rollout.dones.shape[0] * rollout.dones.shape[1] >= self.batch_size
         for i_epoch in range(self.epoch_ppo):
             idx = np.arange(rollout.dones.shape[0])
-            np.random.shuffle(idx)
+            shuffle_rng = getattr(self, "shuffle_rng", None)
+            if shuffle_rng is None:
+                np.random.shuffle(idx)
+            else:
+                shuffle_rng.shuffle(idx)
             rnn_chunk_ids = jnp.arange(rollout.dones.shape[1])
             rnn_chunk_ids = jnp.array(jnp.array_split(rnn_chunk_ids, rollout.dones.shape[1] // self.rnn_step))
             batch_idx = jnp.array(jnp.array_split(idx, idx.shape[0] // (self.batch_size // rollout.dones.shape[1])))
@@ -283,11 +319,19 @@ class InforMARL(Algorithm):
     ) -> Tuple[Array, Array, Array]:
         T_graphs = rollout.graph  # (T, ...)
 
-        def body_(rnn_state, graph):
+        def body_(rnn_state, inp):
+            graph, previous_done = inp
+            if getattr(self, "episodic_rollout", False):
+                rnn_state = jtu.tree_map(
+                    lambda state: jnp.where(previous_done, jnp.zeros_like(state), state),
+                    rnn_state)
             value, new_rnn_state = self.Vl.get_value(Vl_params, graph, rnn_state)
             return new_rnn_state, (value, rnn_state)
 
-        final_rnn_state, (T11_Vl, T_rnn_states) = jax.lax.scan(body_, init_Vl_rnn_state, T_graphs)
+        previous_dones = jnp.concatenate(
+            (jnp.zeros((1,), dtype=jnp.bool_), rollout.dones[:-1]))
+        final_rnn_state, (T11_Vl, T_rnn_states) = jax.lax.scan(
+            body_, init_Vl_rnn_state, (T_graphs, previous_dones))
         T_Vl = T11_Vl.squeeze(1).squeeze(1)
 
         return T_Vl, T_rnn_states, final_rnn_state
@@ -323,12 +367,35 @@ class InforMARL(Algorithm):
         # calculate GAE
         cost_weight = self.cost_schedule_fn(step)
         bTp1ah_Vh = bTp1_Vl[:, :, None, None].repeat(self.n_agents, axis=-2).repeat(rollout.costs.shape[-1], axis=-1)
-        bTah_Qh, bT_Ql = jax.vmap(
-            ft.partial(compute_dec_ocp_gae, disc_gamma=self.gamma, gae_lambda=self.gae_lambda)
-        )(Tah_hs=rollout.costs,
-          T_l=-rollout.rewards + cost_weight * jnp.maximum(rollout.costs, 0.0).sum(axis=-1).sum(axis=-1),
-          Tp1ah_Vh=bTp1ah_Vh,
-          Tp1_Vl=bTp1_Vl)
+        if getattr(self, "episodic_rollout", False):
+            # The original InforMARL target assumes one uninterrupted episode.
+            # A fixed horizon can contain several episodes, so use done-masked
+            # GAE for its (cost-minimizing) value target.
+            losses = (-rollout.rewards + cost_weight *
+                      jnp.maximum(rollout.costs, 0.0).sum(axis=(-1, -2)))
+
+            def one_env_gae(reward_cost, values, dones):
+                def step_gae(carry, inp):
+                    loss, value, next_value, done = inp
+                    discount = self.gamma * (1.0 - done.astype(value.dtype))
+                    advantage = loss + discount * next_value - value
+                    carry = advantage + discount * self.gae_lambda * carry
+                    return carry, carry + value
+
+                _, targets = lax.scan(
+                    step_gae, jnp.zeros_like(values[0]),
+                    (reward_cost, values[:-1], values[1:], dones), reverse=True)
+                return targets
+
+            bT_Ql = jax.vmap(one_env_gae)(losses, bTp1_Vl, rollout.dones)
+            bTah_Qh = jnp.zeros_like(rollout.costs)
+        else:
+            bTah_Qh, bT_Ql = jax.vmap(
+                ft.partial(compute_dec_ocp_gae, disc_gamma=self.gamma, gae_lambda=self.gae_lambda)
+            )(Tah_hs=rollout.costs,
+              T_l=-rollout.rewards + cost_weight * jnp.maximum(rollout.costs, 0.0).sum(axis=-1).sum(axis=-1),
+              Tp1ah_Vh=bTp1ah_Vh,
+              Tp1_Vl=bTp1_Vl)
         assert bTah_Qh.shape == (b, T, a, self._env.n_cost)
         assert bT_Ql.shape == (b, T)
         bT_Al = bT_Ql - bT_Vl
@@ -371,7 +438,8 @@ class InforMARL(Algorithm):
                 ft.partial(self.scan_Vl,
                            Vl_params=params)
             ))(bcT_rollout, bc_rnn_state_inits)
-            loss_Vl = optax.l2_loss(bcT_Vl, bcT_targets).mean()
+            loss_Vl = self.value_coefficient * optax.l2_loss(
+                bcT_Vl, bcT_targets).mean()
             return loss_Vl
 
         loss, grad = jax.value_and_grad(get_loss_)(Vl_train_state.params)
@@ -392,6 +460,17 @@ class InforMARL(Algorithm):
             T_action_keys: PRNGKey,
             actor_params: Params
     ) -> Tuple[Array, Array, Array, Array]:
+        if not self.actor_use_rnn:
+            # A feedforward actor has no temporal dependency. Evaluate all
+            # timesteps together instead of launching a sequential scan.
+            def evaluate_step(graph, action, key):
+                return self.policy.eval_action(
+                    actor_params, graph, action, init_rnn_state, key)
+
+            Ta_log_pis, Ta_entropies, T_rnn_states = jax.vmap(
+                evaluate_step)(T_graphs, Ta_actions, T_action_keys)
+            return Ta_log_pis, Ta_entropies, T_rnn_states, init_rnn_state
+
         def body_(rnn_state, inp):
             graph, action, key = inp
             log_pi, entropy, new_rnn_state = self.policy.eval_action(actor_params, graph, action, rnn_state, key)
@@ -448,6 +527,13 @@ class InforMARL(Algorithm):
 
         (loss, info), grad = jax.value_and_grad(get_loss_, has_aux=True)(policy_train_state.params)
         policy_has_nan = has_any_nan_or_inf(grad).astype(jnp.float32)
+
+        # Continual-learning subclasses may freeze a fixed parameter subset.
+        # The ordinary InforMARL path has no mask and is unchanged.
+        if getattr(self, "actor_grad_mask", None) is not None:
+            grad = jtu.tree_map(
+                lambda g, mask: jnp.where(mask, g, jnp.zeros_like(g)),
+                grad, self.actor_grad_mask)
 
         # clip grad
         grad, grad_norm = compute_norm_and_clip(grad, self.max_grad_norm)

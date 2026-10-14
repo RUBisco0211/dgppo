@@ -37,9 +37,11 @@ class TanhTransformedDistribution(tfd.TransformedDistribution):
     def entropy(self, name='entropy', **kwargs):
         # We return an estimation using a single sample of the log_det_jacobian.
         # We can still do some backpropagation with this estimate.
-        seed = np.random.randint(0, 102400)
+        seed = kwargs.pop('seed', None)
+        if seed is None:
+            seed = jr.PRNGKey(np.random.randint(0, 102400))
         return self.distribution.entropy() + self.bijector.forward_log_det_jacobian(
-            self.distribution.sample(seed=jr.PRNGKey(seed)), event_ndims=0
+            self.distribution.sample(seed=seed), event_ndims=0
         )
 
     def _mode(self) -> jnp.ndarray:

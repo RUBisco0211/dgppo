@@ -57,6 +57,39 @@ def rollout(
     return rollout_data
 
 
+def episodic_rollout(env: MultiAgentEnv, actor: Callable,
+                     init_rnn_state: Array, key: PRNGKey,
+                     horizon: int = 128) -> Rollout:
+    """Collect a fixed PPO horizon, resetting at episode boundaries.
+
+    ``next_graph`` stores the terminal observation for the transition; the
+    scan carry receives a fresh observation on the following step.
+    """
+    reset_key, key = jax.random.split(key)
+    graph = env.reset(reset_key)
+
+    def body(carry, step_key):
+        graph, rnn_state, episode_step = carry
+        action_key, reset_key = jax.random.split(step_key)
+        action, log_pi, next_rnn_state = actor(graph, rnn_state, action_key)
+        next_graph, reward, cost, env_done, _ = env.step(graph, action)
+        done = env_done | (episode_step + 1 >= env.max_episode_steps)
+        carry_graph = jax.lax.cond(
+            done, lambda _: env.reset(reset_key), lambda _: next_graph,
+            operand=None)
+        carry_rnn = jax.tree_util.tree_map(
+            lambda state, initial: jnp.where(done, initial, state),
+            next_rnn_state, init_rnn_state)
+        output = (graph, action, rnn_state, reward, cost, done, log_pi,
+                  next_graph)
+        return (carry_graph, carry_rnn,
+                jnp.where(done, 0, episode_step + 1)), output
+
+    keys = jax.random.split(key, horizon)
+    _, data = jax.lax.scan(body, (graph, init_rnn_state, jnp.array(0)), keys)
+    return Rollout(*data)
+
+
 def test_rollout(
         env: MultiAgentEnv,
         actor: Callable,
